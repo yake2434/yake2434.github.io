@@ -178,9 +178,38 @@
         }
     });
 
+    // 觸控事件處理
+    let touchStartX = 0;
+    let touchStartY = 0;
+
+    canvas.addEventListener('touchstart', (e) => {
+        const touch = e.touches[0];
+        touchStartX = touch.clientX;
+        touchStartY = touch.clientY;
+    });
+
+    canvas.addEventListener('touchmove', (e) => {
+        const touch = e.touches[0];
+        const touchX = touch.clientX;
+        const touchY = touch.clientY;
+
+        const dx = touchX - touchStartX;
+        const dy = touchY - touchStartY;
+
+        player.x += dx;
+        player.y += dy;
+
+        touchStartX = touchX;
+        touchStartY = touchY;
+    });
+
+    canvas.addEventListener('touchend', (e) => {
+        // 手指抬起時，發射子彈
+        player.missiles.push({ x: player.x + player.width / 2 - 2.5, y: player.y, width: 5, height: 10 });
+    });
+
     setInterval(createEnemy, 1000);
     gameLoop();
 </script>
 </body>
 </html>
-
