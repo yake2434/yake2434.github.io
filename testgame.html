@@ -17,10 +17,51 @@
             width: 100%;
             height: 100%;
         }
+        .controls {
+            position: absolute;
+            z-index: 10;
+        }
+        .dpad {
+            position: absolute;
+            left: 10px;
+            bottom: 10px;
+            display: grid;
+            grid-template-columns: repeat(3, 60px);
+            grid-template-rows: repeat(3, 60px);
+        }
+        .dpad button {
+            width: 60px;
+            height: 60px;
+            background: rgba(255, 255, 255, 0.5);
+            border: none;
+            outline: none;
+        }
+        .fire-button {
+            position: absolute;
+            right: 10px;
+            bottom: 10px;
+            width: 100px;
+            height: 100px;
+            background: rgba(255, 0, 0, 0.5);
+            border: none;
+            outline: none;
+            border-radius: 50%;
+        }
     </style>
 </head>
 <body>
 <canvas id="gameCanvas"></canvas>
+<div class="controls">
+    <div class="dpad">
+        <button id="up"></button>
+        <button></button>
+        <button id="down"></button>
+        <button id="left"></button>
+        <button></button>
+        <button id="right"></button>
+    </div>
+    <button class="fire-button" id="fire"></button>
+</div>
 <script>
     const canvas = document.getElementById('gameCanvas');
     const context = canvas.getContext('2d');
@@ -36,6 +77,7 @@
     let player = { x: canvas.width / 2 - 25, y: canvas.height - 100, width: 50, height: 50, missiles: [], alive: true };
     let enemies = [];
     let keys = {};
+    let touchControls = { up: false, down: false, left: false, right: false, fire: false };
     let score = 0;
     let backgroundY = 0;  // 背景位置
 
@@ -89,14 +131,17 @@
     }
 
     function updatePlayer() {
-        if (keys['ArrowUp'] && player.y > 0) player.y -= 5;
-        if (keys['ArrowDown'] && player.y < canvas.height - player.height) player.y += 5;
-        if (keys['ArrowLeft'] && player.x > 0) player.x -= 5;
-        if (keys['ArrowRight'] && player.x < canvas.width - player.width) player.x += 5;
+        if (keys['ArrowUp'] || touchControls.up) player.y -= 5;
+        if (keys['ArrowDown'] || touchControls.down) player.y += 5;
+        if (keys['ArrowLeft'] || touchControls.left) player.x -= 5;
+        if (keys['ArrowRight'] || touchControls.right) player.x += 5;
         player.missiles.forEach((missile, index) => {
             missile.y -= 10;
             if (missile.y < 0) player.missiles.splice(index, 1);
         });
+        if (touchControls.fire) {
+            player.missiles.push({ x: player.x + player.width / 2 - 2.5, y: player.y, width: 5, height: 10 });
+        }
     }
 
     function updateEnemies() {
@@ -210,6 +255,19 @@
 
     setInterval(createEnemy, 1000);
     gameLoop();
+
+    // 虛擬按鈕事件處理
+    document.getElementById('up').addEventListener('touchstart', () => { touchControls.up = true; });
+    document.getElementById('up').addEventListener('touchend', () => { touchControls.up = false; });
+    document.getElementById('down').addEventListener('touchstart', () => { touchControls.down = true; });
+    document.getElementById('down').addEventListener('touchend', () => { touchControls.down = false; });
+    document.getElementById('left').addEventListener('touchstart', () => { touchControls.left = true; });
+    document.getElementById('left').addEventListener('touchend', () => { touchControls.left = false; });
+    document.getElementById('right').addEventListener('touchstart', () => { touchControls.right = true; });
+    document.getElementById('right').addEventListener('touchend', () => { touchControls.right = false; });
+    document.getElementById('fire').addEventListener('touchstart', () => { touchControls.fire = true; });
+    document.getElementById('fire').addEventListener('touchend', () => { touchControls.fire = false; });
+
 </script>
 </body>
 </html>
