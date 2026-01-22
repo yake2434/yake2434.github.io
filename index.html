@@ -3,78 +3,67 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>車牌辨識系統 (抗干擾優化版)</title>
+    <title>車牌辨識 (廣角容錯版)</title>
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
     <style>
-        body { font-family: "Microsoft JhengHei", sans-serif; text-align: center; padding: 10px; background: #1a1a1a; color: white; }
+        body { font-family: "Microsoft JhengHei", sans-serif; text-align: center; padding: 10px; background: #000; color: white; }
         
         #video-container { 
             position: relative; margin: 0 auto; 
             width: 100%; max-width: 640px; height: 400px;
-            background: #000; overflow: hidden; border-radius: 12px;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+            background: #111; overflow: hidden; border-radius: 12px;
         }
         video { width: 100%; height: 100%; object-fit: cover; }
         
-        /* 掃描框 */
+        /* 掃描框：改為虛線，並稍微加大，允許一點點角度偏差 */
         .scan-region {
             position: absolute; top: 50%; left: 50%; 
             transform: translate(-50%, -50%);
-            width: 80%; height: 25%; 
-            border: 3px solid #00ff00; border-radius: 8px;
-            box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.7); /* 加深周圍暗度 */
+            width: 85%; height: 30%; 
+            border: 2px dashed #00ff00; border-radius: 6px;
+            box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.5);
             z-index: 10;
         }
-        .scan-label {
-            position: absolute; top: -30px; left: 0; width: 100%;
-            color: #00ff00; font-weight: bold; font-size: 14px; text-shadow: 1px 1px 2px black;
-        }
-
+        
         .controls { margin-top: 15px; }
         button {
-            padding: 12px 20px; font-size: 16px; border: none; border-radius: 8px;
-            background-color: #007bff; color: white; cursor: pointer; margin: 8px;
+            padding: 10px 20px; font-size: 16px; border: none; border-radius: 5px;
+            background-color: #444; color: white; cursor: pointer; margin: 5px;
         }
-        button:disabled { background-color: #444; color: #888; }
-        button.scan-btn { background-color: #28a745; width: 70%; padding: 18px; font-size: 1.3em; font-weight: bold;}
+        button.scan-btn { background-color: #28a745; width: 80%; padding: 15px; font-size: 1.2em; font-weight: bold; }
+        button:disabled { background-color: #222; color: #555; }
 
-        #result-area { margin-top: 15px; padding: 15px; background: #333; border-radius: 10px; min-height: 80px; }
-        .ocr-raw { color: #888; font-size: 0.8em; margin-bottom: 8px; word-break: break-all; }
-        
-        .match-success { color: #4dff4d; font-size: 1.8em; font-weight: 900; }
-        .match-fail { color: #ff4d4d; font-size: 1.5em; font-weight: 900; }
+        #result-area { margin-top: 15px; padding: 10px; background: #222; border-radius: 8px; min-height: 60px; }
+        .match-success { color: #4dff4d; font-size: 1.8em; font-weight: bold; }
+        .match-fail { color: #ff4d4d; font-size: 1.2em; }
+        .debug-info { color: #888; font-size: 0.8em; margin-top: 5px; }
 
-        #debug-container { margin-top: 20px; border-top: 1px dashed #555; padding-top: 10px; }
-        #processedCanvas { border: 1px solid #666; width: 180px; height: auto; background: #000; display: block; margin: 0 auto; }
+        /* 除錯畫布 */
+        #processedCanvas { border: 1px solid #444; width: 200px; display: block; margin: 10px auto; background: black; }
     </style>
 </head>
 <body>
 
-    <h3>🛡️ 車牌辨識 (抗貼紙干擾版)</h3>
+    <h3>🛡️ 車牌辨識 (強效容錯版)</h3>
     <div id="dbStatus" style="font-size: 12px; color: #aaa;">資料庫載入中...</div>
 
     <div id="video-container">
         <video id="video" playsinline autoplay muted></video>
-        <div class="scan-region">
-            <div class="scan-label">請將車牌置於框內</div>
-        </div>
+        <div class="scan-region"></div>
     </div>
 
     <div class="controls">
-        <button id="startBtn">1. 啟動相機</button>
+        <button id="startBtn">啟動相機</button>
         <br>
-        <button id="scanBtn" class="scan-btn" disabled>📸 智慧辨識</button>
+        <button id="scanBtn" class="scan-btn" disabled>📸 辨識</button>
     </div>
 
     <div id="result-area">
-        <div id="ocrRaw" class="ocr-raw"></div>
         <div id="statusMsg">等待操作...</div>
+        <div id="debugRaw" class="debug-info"></div>
     </div>
 
-    <div id="debug-container">
-        <div style="font-size:10px; color:#aaa; margin-bottom:5px;">電腦判定影像:</div>
-        <canvas id="processedCanvas"></canvas>
-    </div>
+    <canvas id="processedCanvas"></canvas>
 
     <script>
         let whitelistArray = [];
@@ -82,16 +71,35 @@
         const startBtn = document.getElementById('startBtn');
         const scanBtn = document.getElementById('scanBtn');
         const statusMsg = document.getElementById('statusMsg');
-        const ocrRawMsg = document.getElementById('ocrRaw');
+        const debugRaw = document.getElementById('debugRaw');
         const dbStatus = document.getElementById('dbStatus');
         const processedCanvas = document.getElementById('processedCanvas');
+
+        // 定義「易混淆字元」對應表
+        // 規則：如果我看不到 A，但我看到 B，且 A 和 B 在表裡是兄弟，那就當作我看對了
+        const CONFUSABLE_MAP = {
+            '4': ['6', 'A'],    // 4 容易被看成 6 或 A
+            '6': ['4', 'G', '8', '0'], // 6 容易被看成 4, G, 8, 0
+            'Z': ['2', '7'],
+            '2': ['Z'],
+            'B': ['8', 'D'],
+            '8': ['B', '3'],
+            'D': ['0', 'O', 'Q'],
+            '0': ['D', 'O', 'Q'],
+            'O': ['0', 'D', 'Q'],
+            'Q': ['0', 'D', 'O'],
+            'S': ['5'],
+            '5': ['S'],
+            'I': ['1', 'T'],
+            '1': ['I', 'T'],
+            'T': ['1', '7', 'I']
+        };
 
         async function loadWhitelist() {
             try {
                 const response = await fetch('whitelist.txt');
-                if (!response.ok) throw new Error("找不到檔案");
+                if (!response.ok) throw new Error("找不到 whitelist.txt");
                 const text = await response.text();
-                // 載入時將橫線拿掉，統一格式
                 whitelistArray = text.split(/\r?\n/)
                     .map(line => line.trim().replace(/[^a-zA-Z0-9]/g, '').toUpperCase())
                     .filter(item => item.length > 0);
@@ -108,131 +116,142 @@
                     video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } } 
                 });
                 video.srcObject = stream;
-                video.onloadedmetadata = () => {
-                    video.play();
-                    scanBtn.disabled = false;
-                    startBtn.style.display = 'none';
-                    statusMsg.textContent = "準備就緒";
-                };
-            } catch (err) {
-                alert("相機錯誤：" + err.message);
-            }
+                video.onloadedmetadata = () => { video.play(); scanBtn.disabled = false; startBtn.style.display = 'none'; };
+            } catch (err) { alert("相機啟動失敗"); }
         });
 
+        // --- 影像處理：自動色階 (Auto Levels) ---
+        // 這能解決由上往下拍時，上方太亮下方太暗的問題
         function captureAndProcessImage() {
             const ctx = processedCanvas.getContext('2d');
             const vw = video.videoWidth;
             const vh = video.videoHeight;
             
-            // 裁切：稍微縮小一點範圍，避免框框邊緣入鏡
+            // 裁切
             const cropW = vw * 0.8; 
-            const cropH = cropW * 0.3; 
+            const cropH = cropW * 0.35; 
             const cropX = (vw - cropW) / 2;
             const cropY = (vh - cropH) / 2;
 
             processedCanvas.width = cropW;
             processedCanvas.height = cropH;
-
             ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
 
             let imageData = ctx.getImageData(0, 0, cropW, cropH);
             let data = imageData.data;
 
-            // 增強對比 (High Contrast)
+            // 1. 尋找畫面中的最亮與最暗點 (Auto Levels)
+            let min = 255;
+            let max = 0;
             for (let i = 0; i < data.length; i += 4) {
+                // 轉灰階
                 const gray = data[i] * 0.3 + data[i + 1] * 0.59 + data[i + 2] * 0.11;
-                // 門檻值 105，可視情況微調
-                const value = gray > 105 ? 255 : 0; 
+                if (gray < min) min = gray;
+                if (gray > max) max = gray;
+            }
+
+            // 2. 拉伸對比度並二值化
+            // 避免除以0
+            if (max === min) max = min + 1;
+            
+            for (let i = 0; i < data.length; i += 4) {
+                let gray = data[i] * 0.3 + data[i + 1] * 0.59 + data[i + 2] * 0.11;
+                
+                // 正規化：將亮度拉伸到 0~255
+                let normalized = (gray - min) / (max - min) * 255;
+                
+                // 使用中位數 128 作為門檻
+                let value = normalized > 130 ? 255 : 0;
+
                 data[i] = data[i + 1] = data[i + 2] = value;
             }
+
             ctx.putImageData(imageData, 0, 0);
             return processedCanvas.toDataURL('image/png');
         }
 
-        // --- 優化核心：智慧篩選與修正 ---
-        function extractPotentialPlates(rawText) {
-            // 1. 將讀到的所有文字用 空白 或 換行 切開
-            // 例如: "TOYOTA Baby-in-car ABC-1234" -> ["TOYOTA", "Baby-in-car", "ABC-1234"]
-            const tokens = rawText.split(/[\s\n]+/);
+        // --- 核心演算法：容錯比對 (Fuzzy Matcher) ---
+        // 比較兩個字串，允許特定的錯誤
+        function isMatch(scanned, reference) {
+            // 長度差異太大直接出局
+            if (Math.abs(scanned.length - reference.length) > 1) return false;
+
+            // 如果字串包含 reference (例如 scanned="TABC1234" 包含 "ABC1234")
+            if (scanned.includes(reference)) return true;
+
+            // 逐字比對
+            let errorCount = 0;
+            let i = 0; // scanned index
+            let j = 0; // reference index
             
-            let candidates = [];
+            // 簡單的雙指針比對
+            while (i < scanned.length && j < reference.length) {
+                const charS = scanned[i];
+                const charR = reference[j];
 
-            tokens.forEach(token => {
-                // 清理雜訊，只留英數
-                let cleanToken = token.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
-
-                // 2. 台灣車牌過濾邏輯：
-                // 長度必須在 4 到 8 之間 (過短通常是雜訊，過長通常是標語)
-                if (cleanToken.length < 4 || cleanToken.length > 8) return;
-
-                // 3. 必須同時包含「數字」與「字母」 (避免把 "TAX" 或 "2024" 誤認為車牌)
-                // 備註：有些舊式車牌全是數字，如果您的場域有這種車，請移除這行
-                const hasNumber = /[0-9]/.test(cleanToken); 
-                // const hasLetter = /[A-Z]/.test(cleanToken); // 若需要強制包含英文可打開
-
-                if (hasNumber) {
-                    // 4. 進行模糊修正 (Z->2, O->0)
-                    let fuzzyFixed = cleanToken
-                        .replace(/Z/g, '2')
-                        .replace(/O/g, '0')
-                        .replace(/D/g, '0')
-                        .replace(/Q/g, '0')
-                        .replace(/B/g, '8')
-                        .replace(/I/g, '1');
-                    
-                    candidates.push(fuzzyFixed);
+                if (charS === charR) {
+                    i++; j++;
+                } else {
+                    // 如果不相等，檢查是否為「允許的錯誤」
+                    const allowables = CONFUSABLE_MAP[charR]; // 查 reference 的該字有哪些分身
+                    if (allowables && allowables.includes(charS)) {
+                        // 這是個可原諒的錯誤 (例如 R是6, S是4)
+                        i++; j++; 
+                    } else {
+                        // 這是個真的錯誤
+                        errorCount++;
+                        i++; j++;
+                    }
                 }
-            });
-
-            return candidates;
+            }
+            
+            // 允許最多 1 個不明錯誤 (或是因為雜訊多一個字)
+            return errorCount <= 1;
         }
 
         scanBtn.addEventListener('click', async () => {
-            statusMsg.textContent = "⏳ 智慧分析中...";
-            ocrRawMsg.textContent = "";
+            statusMsg.textContent = "⏳ 運算中...";
+            debugRaw.textContent = "";
+            
             const dataUrl = captureAndProcessImage();
 
             try {
                 const { data: { text } } = await Tesseract.recognize(dataUrl, 'eng', {
-                    // ★ 關鍵優化 1: 使用 PSM 7 (視為單行文字)，減少對多行文字的誤判
-                    tessedit_pageseg_mode: '7', 
-                    tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789- ' // 允許空格與橫線以利切分
+                    tessedit_pageseg_mode: '7',
+                    tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789- '
                 });
 
-                ocrRawMsg.textContent = `原始掃描: ${text}`;
-
-                // ★ 關鍵優化 2: 提取潛在車牌 (排除貼紙)
-                const candidates = extractPotentialPlates(text);
+                // 1. 清理
+                // 將換行或空格切開，因為有可能掃描到 "ABC-1234 567" (567是雜訊)
+                // 我們針對每一個切出來的片段去跟資料庫比對
+                const tokens = text.split(/[\s\n]+/);
                 
-                if (candidates.length === 0) {
-                    statusMsg.innerHTML = "⚠️ 找不到像車牌的文字<br><span style='font-size:0.6em'>請靠近一點或避開反光</span>";
-                    return;
-                }
-
-                console.log("過濾後的候選名單:", candidates);
-
-                // 3. 比對資料庫
                 let foundMember = null;
-                
-                // 只要任何一個「候選字串」出現在「資料庫」中 (或反之)
-                for (let candidate of candidates) {
+                let scannedCode = "";
+
+                // 2. 針對每一個片段進行比對
+                for (let rawToken of tokens) {
+                    let cleanToken = rawToken.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+                    if (cleanToken.length < 3) continue; // 太短的不看
+                    
+                    scannedCode += cleanToken + " ";
+
+                    // 遍歷資料庫
                     for (let memberPlate of whitelistArray) {
-                        // 雙向比對：解決 OCR 多讀一碼或少讀一碼的問題
-                        if (candidate.includes(memberPlate) || memberPlate.includes(candidate)) {
-                            // 嚴格檢查：長度差異不能太大 (避免 123 對上 12345)
-                            if (Math.abs(candidate.length - memberPlate.length) <= 1) {
-                                foundMember = memberPlate;
-                                break;
-                            }
+                        if (isMatch(cleanToken, memberPlate)) {
+                            foundMember = memberPlate;
+                            break;
                         }
                     }
                     if (foundMember) break;
                 }
 
+                debugRaw.textContent = `原始識別: ${text} | 清理後: ${scannedCode}`;
+
                 if (foundMember) {
                     statusMsg.innerHTML = `<div class="match-success">⭕ 會員確認<br>${foundMember}</div>`;
                 } else {
-                    statusMsg.innerHTML = `<div class="match-fail">❌ 非會員<br>${candidates[0]}</div>`; // 顯示最像的那個
+                    statusMsg.innerHTML = `<div class="match-fail">❌ 未找到符合會員</div>`;
                 }
 
             } catch (err) {
