@@ -3,87 +3,71 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>車牌辨識系統 (台灣優化版)</title>
+    <title>車牌辨識系統 (抗干擾優化版)</title>
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
     <style>
         body { font-family: "Microsoft JhengHei", sans-serif; text-align: center; padding: 10px; background: #1a1a1a; color: white; }
         
         #video-container { 
             position: relative; margin: 0 auto; 
-            width: 100%; max-width: 640px; height: 450px; /* 拉高畫面 */
+            width: 100%; max-width: 640px; height: 400px;
             background: #000; overflow: hidden; border-radius: 12px;
             box-shadow: 0 4px 15px rgba(0,0,0,0.5);
         }
         video { width: 100%; height: 100%; object-fit: cover; }
         
-        /* --- 修正後的掃描框 --- */
+        /* 掃描框 */
         .scan-region {
             position: absolute; top: 50%; left: 50%; 
             transform: translate(-50%, -50%);
-            /* 台灣車牌比例約為 38x16 (汽車) 或 26x15 (機車) */
-            /* 這裡設定一個通用的 寬高比，約 2.5 : 1 */
-            width: 85%; 
-            height: 25%; 
-            border: 4px solid #00ff00; 
-            border-radius: 8px;
-            /* 讓框框外變暗 (遮罩效果) */
-            box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.6); 
+            width: 80%; height: 25%; 
+            border: 3px solid #00ff00; border-radius: 8px;
+            box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.7); /* 加深周圍暗度 */
             z-index: 10;
         }
-        /* 增加四個角落的標記，讓對焦更容易 */
-        .scan-region::after, .scan-region::before {
-            content: ''; position: absolute; width: 20px; height: 20px; border-color: #00ff00; border-style: solid;
-        }
-        .scan-region::before { top: -2px; left: -2px; border-width: 4px 0 0 4px; }
-        .scan-region::after { bottom: -2px; right: -2px; border-width: 0 4px 4px 0; }
-
         .scan-label {
-            position: absolute; top: -35px; left: 0; width: 100%;
-            color: #00ff00; font-weight: bold; font-size: 16px; text-shadow: 2px 2px 4px black;
-            background: rgba(0,0,0,0.5); padding: 4px 0; border-radius: 4px;
+            position: absolute; top: -30px; left: 0; width: 100%;
+            color: #00ff00; font-weight: bold; font-size: 14px; text-shadow: 1px 1px 2px black;
         }
 
         .controls { margin-top: 15px; }
         button {
-            padding: 12px 24px; font-size: 18px; border: none; border-radius: 8px;
+            padding: 12px 20px; font-size: 16px; border: none; border-radius: 8px;
             background-color: #007bff; color: white; cursor: pointer; margin: 8px;
-            box-shadow: 0 4px 0 #0056b3; transition: 0.1s;
         }
-        button:active { transform: translateY(4px); box-shadow: 0 0 0; }
-        button:disabled { background-color: #555; color: #888; box-shadow: none; transform: none; }
-        button.scan-btn { background-color: #28a745; width: 70%; padding: 18px; font-size: 1.3em; box-shadow: 0 4px 0 #1e7e34; }
+        button:disabled { background-color: #444; color: #888; }
+        button.scan-btn { background-color: #28a745; width: 70%; padding: 18px; font-size: 1.3em; font-weight: bold;}
 
-        #result-area { margin-top: 15px; padding: 15px; background: #333; border-radius: 10px; min-height: 100px; }
-        .ocr-raw { color: #aaa; font-size: 0.9em; margin-bottom: 8px; font-family: monospace; }
+        #result-area { margin-top: 15px; padding: 15px; background: #333; border-radius: 10px; min-height: 80px; }
+        .ocr-raw { color: #888; font-size: 0.8em; margin-bottom: 8px; word-break: break-all; }
         
-        .match-success { color: #4dff4d; font-size: 1.6em; font-weight: 900; line-height: 1.4; text-shadow: 0 0 10px rgba(0,255,0,0.3); }
-        .match-fail { color: #ff4d4d; font-size: 1.6em; font-weight: 900; }
+        .match-success { color: #4dff4d; font-size: 1.8em; font-weight: 900; }
+        .match-fail { color: #ff4d4d; font-size: 1.5em; font-weight: 900; }
 
-        /* 除錯區：縮小一點避免佔空間 */
         #debug-container { margin-top: 20px; border-top: 1px dashed #555; padding-top: 10px; }
         #processedCanvas { border: 1px solid #666; width: 180px; height: auto; background: #000; display: block; margin: 0 auto; }
     </style>
 </head>
 <body>
 
-    <h3>🇹🇼 台灣車牌辨識系統</h3>
+    <h3>🛡️ 車牌辨識 (抗貼紙干擾版)</h3>
     <div id="dbStatus" style="font-size: 12px; color: #aaa;">資料庫載入中...</div>
 
     <div id="video-container">
         <video id="video" playsinline autoplay muted></video>
         <div class="scan-region">
-            <div class="scan-label">將車牌置於框內 (支援汽機車)</div>
+            <div class="scan-label">請將車牌置於框內</div>
         </div>
     </div>
 
     <div class="controls">
         <button id="startBtn">1. 啟動相機</button>
         <br>
-        <button id="scanBtn" class="scan-btn" disabled>📸 辨識車牌</button>
+        <button id="scanBtn" class="scan-btn" disabled>📸 智慧辨識</button>
     </div>
 
     <div id="result-area">
-        <div id="ocrRaw" class="ocr-raw">原始讀取：-</div>
+        <div id="ocrRaw" class="ocr-raw"></div>
         <div id="statusMsg">等待操作...</div>
     </div>
 
@@ -93,7 +77,7 @@
     </div>
 
     <script>
-        let whitelistArray = []; 
+        let whitelistArray = [];
         const video = document.getElementById('video');
         const startBtn = document.getElementById('startBtn');
         const scanBtn = document.getElementById('scanBtn');
@@ -102,25 +86,22 @@
         const dbStatus = document.getElementById('dbStatus');
         const processedCanvas = document.getElementById('processedCanvas');
 
-        // 1. 載入資料庫 (維持不變)
         async function loadWhitelist() {
             try {
                 const response = await fetch('whitelist.txt');
                 if (!response.ok) throw new Error("找不到檔案");
                 const text = await response.text();
-                // 這裡會把資料庫的車號也清理乾淨 (去掉橫線)
+                // 載入時將橫線拿掉，統一格式
                 whitelistArray = text.split(/\r?\n/)
                     .map(line => line.trim().replace(/[^a-zA-Z0-9]/g, '').toUpperCase())
                     .filter(item => item.length > 0);
-                
-                dbStatus.textContent = `✅ 資料庫就緒：${whitelistArray.length} 筆資料`;
+                dbStatus.textContent = `✅ 資料庫：${whitelistArray.length} 筆`;
             } catch (err) {
                 dbStatus.textContent = "❌ 資料庫載入失敗";
             }
         }
         loadWhitelist();
 
-        // 2. 啟動相機 (維持不變)
         startBtn.addEventListener('click', async () => {
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({ 
@@ -131,23 +112,21 @@
                     video.play();
                     scanBtn.disabled = false;
                     startBtn.style.display = 'none';
-                    statusMsg.textContent = "請對準車牌";
+                    statusMsg.textContent = "準備就緒";
                 };
             } catch (err) {
                 alert("相機錯誤：" + err.message);
             }
         });
 
-        // 3. 影像處理 (配合新框框調整裁切)
         function captureAndProcessImage() {
             const ctx = processedCanvas.getContext('2d');
             const vw = video.videoWidth;
             const vh = video.videoHeight;
             
-            // 根據 CSS 的框框比例調整裁切區域
-            // 寬度 85%, 高度 25%
-            const cropW = vw * 0.85; 
-            const cropH = cropW * 0.35; // 保持約 1:3 的比例
+            // 裁切：稍微縮小一點範圍，避免框框邊緣入鏡
+            const cropW = vw * 0.8; 
+            const cropH = cropW * 0.3; 
             const cropX = (vw - cropW) / 2;
             const cropY = (vh - cropH) / 2;
 
@@ -159,89 +138,101 @@
             let imageData = ctx.getImageData(0, 0, cropW, cropH);
             let data = imageData.data;
 
-            // 強化對比度 (二值化)
+            // 增強對比 (High Contrast)
             for (let i = 0; i < data.length; i += 4) {
                 const gray = data[i] * 0.3 + data[i + 1] * 0.59 + data[i + 2] * 0.11;
-                // 稍微提高門檻值以過濾淺色雜訊
-                const value = gray > 100 ? 255 : 0; 
+                // 門檻值 105，可視情況微調
+                const value = gray > 105 ? 255 : 0; 
                 data[i] = data[i + 1] = data[i + 2] = value;
             }
             ctx.putImageData(imageData, 0, 0);
             return processedCanvas.toDataURL('image/png');
         }
 
-        // ★ 核心功能：模糊修正器 ★
-        // 這會產生「可能的車牌變體」，解決 Z/2, O/0 混淆問題
-        function getFuzzyCandidates(text) {
-            let candidates = [text]; // 原始文字算第一個候選人
+        // --- 優化核心：智慧篩選與修正 ---
+        function extractPotentialPlates(rawText) {
+            // 1. 將讀到的所有文字用 空白 或 換行 切開
+            // 例如: "TOYOTA Baby-in-car ABC-1234" -> ["TOYOTA", "Baby-in-car", "ABC-1234"]
+            const tokens = rawText.split(/[\s\n]+/);
             
-            // 如果文字中有易混淆字元，產生修正版
-            // 例如: "AZZ5678" -> "A225678"
-            
-            // 規則 1: 數字混淆修正 (把像數字的英文轉回數字)
-            let fixNums = text
-                .replace(/Z/g, '2')
-                .replace(/O/g, '0')
-                .replace(/D/g, '0')
-                .replace(/Q/g, '0')
-                .replace(/B/g, '8')
-                .replace(/S/g, '5')
-                .replace(/I/g, '1')
-                .replace(/L/g, '1');
-            
-            if (fixNums !== text) candidates.push(fixNums);
+            let candidates = [];
 
-            // 規則 2 (反向): 如果車牌是 ABC 開頭，有時會被誤判成數字
-            // (例如 4BC -> ABC)，這裡視您的車牌類型而定，暫時先不加，避免誤判。
+            tokens.forEach(token => {
+                // 清理雜訊，只留英數
+                let cleanToken = token.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+
+                // 2. 台灣車牌過濾邏輯：
+                // 長度必須在 4 到 8 之間 (過短通常是雜訊，過長通常是標語)
+                if (cleanToken.length < 4 || cleanToken.length > 8) return;
+
+                // 3. 必須同時包含「數字」與「字母」 (避免把 "TAX" 或 "2024" 誤認為車牌)
+                // 備註：有些舊式車牌全是數字，如果您的場域有這種車，請移除這行
+                const hasNumber = /[0-9]/.test(cleanToken); 
+                // const hasLetter = /[A-Z]/.test(cleanToken); // 若需要強制包含英文可打開
+
+                if (hasNumber) {
+                    // 4. 進行模糊修正 (Z->2, O->0)
+                    let fuzzyFixed = cleanToken
+                        .replace(/Z/g, '2')
+                        .replace(/O/g, '0')
+                        .replace(/D/g, '0')
+                        .replace(/Q/g, '0')
+                        .replace(/B/g, '8')
+                        .replace(/I/g, '1');
+                    
+                    candidates.push(fuzzyFixed);
+                }
+            });
 
             return candidates;
         }
 
-        // 4. 辨識與邏輯
         scanBtn.addEventListener('click', async () => {
-            statusMsg.textContent = "⏳ 分析中...";
+            statusMsg.textContent = "⏳ 智慧分析中...";
             ocrRawMsg.textContent = "";
             const dataUrl = captureAndProcessImage();
 
             try {
                 const { data: { text } } = await Tesseract.recognize(dataUrl, 'eng', {
-                    tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+                    // ★ 關鍵優化 1: 使用 PSM 7 (視為單行文字)，減少對多行文字的誤判
+                    tessedit_pageseg_mode: '7', 
+                    tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789- ' // 允許空格與橫線以利切分
                 });
 
-                // 1. 清理原始雜訊
-                const dirtyResult = text.replace(/[^A-Z0-9]/g, ''); 
+                ocrRawMsg.textContent = `原始掃描: ${text}`;
+
+                // ★ 關鍵優化 2: 提取潛在車牌 (排除貼紙)
+                const candidates = extractPotentialPlates(text);
                 
-                if (dirtyResult.length < 3) {
-                    statusMsg.textContent = "⚠️ 影像不清，請再試一次";
+                if (candidates.length === 0) {
+                    statusMsg.innerHTML = "⚠️ 找不到像車牌的文字<br><span style='font-size:0.6em'>請靠近一點或避開反光</span>";
                     return;
                 }
 
-                // 2. 產生修正後的候選字串 (例如將 Z 轉為 2)
-                const candidates = getFuzzyCandidates(dirtyResult);
-                
-                // 顯示除錯訊息
-                ocrRawMsg.innerHTML = `原始: ${dirtyResult}<br>修正嘗試: ${candidates.join(', ')}`;
+                console.log("過濾後的候選名單:", candidates);
 
                 // 3. 比對資料庫
                 let foundMember = null;
                 
-                // 雙重迴圈比對：
-                // 檢查每一個「資料庫車號」是否出現在「任何一個候選字串」中
+                // 只要任何一個「候選字串」出現在「資料庫」中 (或反之)
                 for (let candidate of candidates) {
                     for (let memberPlate of whitelistArray) {
-                        if (candidate.includes(memberPlate)) {
-                            foundMember = memberPlate;
-                            break;
+                        // 雙向比對：解決 OCR 多讀一碼或少讀一碼的問題
+                        if (candidate.includes(memberPlate) || memberPlate.includes(candidate)) {
+                            // 嚴格檢查：長度差異不能太大 (避免 123 對上 12345)
+                            if (Math.abs(candidate.length - memberPlate.length) <= 1) {
+                                foundMember = memberPlate;
+                                break;
+                            }
                         }
                     }
                     if (foundMember) break;
                 }
 
                 if (foundMember) {
-                    statusMsg.innerHTML = `<div class="match-success">⭕ 歡迎會員<br>${foundMember}</div>`;
-                    // 可以在這裡加入語音: new Audio('success.mp3').play();
+                    statusMsg.innerHTML = `<div class="match-success">⭕ 會員確認<br>${foundMember}</div>`;
                 } else {
-                    statusMsg.innerHTML = `<div class="match-fail">❌ 非會員<br>${dirtyResult}</div>`;
+                    statusMsg.innerHTML = `<div class="match-fail">❌ 非會員<br>${candidates[0]}</div>`; // 顯示最像的那個
                 }
 
             } catch (err) {
