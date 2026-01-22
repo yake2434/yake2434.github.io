@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>車牌辨識 (快速穩定版)</title>
+    <title>GitHub 車牌辨識系統</title>
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
     <style>
         body { font-family: "Microsoft JhengHei", sans-serif; text-align: center; padding: 10px; background: #000; color: white; }
@@ -15,13 +15,12 @@
         }
         video { width: 100%; height: 100%; object-fit: cover; }
         
-        /* 掃描框 */
         .scan-region {
             position: absolute; top: 50%; left: 50%; 
             transform: translate(-50%, -50%);
             width: 75%; height: 30%; 
             border: 3px solid #00ff00; border-radius: 6px;
-            box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.6); /* 聚光燈效果 */
+            box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.6); 
             z-index: 10;
         }
 
@@ -36,18 +35,19 @@
         #result-area { margin-top: 15px; padding: 15px; background: #222; border-radius: 12px; }
         .match-success { color: #4dff4d; font-size: 1.8em; font-weight: 900; }
         
-        /* 信心進度條 */
         #confidence-wrapper { width: 80%; height: 10px; background: #444; margin: 10px auto; border-radius: 5px; overflow: hidden; }
         #confidence-bar { width: 0%; height: 100%; background: #00ff00; transition: width 0.1s; }
+        
+        /* 錯誤訊息顯示區 */
+        .error-msg { color: #ff4d4d; font-size: 0.9em; margin-top: 5px; }
 
-        /* 隱藏畫布 */
         #processedCanvas { display: none; }
     </style>
 </head>
 <body>
 
-    <h3>🛡️ 車牌辨識 (連續2次確認)</h3>
-    <div id="dbStatus" style="font-size: 12px; color: #aaa;">資料庫載入中...</div>
+    <h3>🛡️ 車牌辨識 (GitHub 版)</h3>
+    <div id="dbStatus" style="font-size: 12px; color: #aaa;">正在連線到 whitelist.txt...</div>
 
     <div id="video-container">
         <video id="video" playsinline autoplay muted></video>
@@ -70,7 +70,8 @@
 
     <script>
         // === 設定區 ===
-        const VOTE_THRESHOLD = 2; // ★ 設定為 2 次就通過
+        const VOTE_THRESHOLD = 2; // 連續 2 次成功即通過
+        const FILENAME = './whitelist.txt'; // 指定當前目錄
         // =============
 
         let whitelistArray = [];
@@ -86,28 +87,49 @@
         const dbStatus = document.getElementById('dbStatus');
         const processedCanvas = document.getElementById('processedCanvas');
 
-        // 內建的易混淆對照表 (6=4, Z=2, B=8)
         const CONFUSABLE_MAP = {
             '4': ['6', 'A'], '6': ['4', 'G', '8', '0', 'B'], 
             'Z': ['2', '7'], '2': ['Z'],
             'B': ['8', 'D', '0', '6'], '8': ['B', '3', 'S', '6'],
             'D': ['0', 'O', 'Q'], '0': ['D', 'O', 'Q'], 'O': ['0', 'D', 'Q'],
-            'S': ['5'], '5': ['S'],
-            'I': ['1'], '1': ['I', 'T']
+            'S': ['5'], '5': ['S'], 'I': ['1'], '1': ['I', 'T']
         };
 
-        // 1. 載入資料庫
+        // 1. 載入資料庫 (針對 GitHub 優化)
         async function loadWhitelist() {
             try {
-                const response = await fetch('whitelist.txt');
-                if (!response.ok) throw new Error("找不到檔案");
+                // 加入時間參數避免 GitHub 快取舊檔案
+                const cacheBuster = `?t=${new Date().getTime()}`;
+                const fetchUrl = FILENAME + cacheBuster;
+
+                console.log(`正在讀取: ${fetchUrl}`);
+                const response = await fetch(fetchUrl);
+
+                // 檢查 HTTP 狀態碼
+                if (!response.ok) {
+                    if (response.status === 404) throw new Error("找不到檔案 (404) - 請檢查檔名大小寫");
+                    throw new Error(`HTTP 錯誤 (${response.status})`);
+                }
+
                 const text = await response.text();
+                
+                // 解析內容
                 whitelistArray = text.split(/\r?\n/)
                     .map(line => line.trim().replace(/[^a-zA-Z0-9]/g, '').toUpperCase())
                     .filter(item => item.length > 0);
-                dbStatus.textContent = `✅ 資料庫已載入：${whitelistArray.length} 筆`;
+                
+                if (whitelistArray.length === 0) {
+                    throw new Error("檔案是空的");
+                }
+
+                dbStatus.textContent = `✅ 資料庫已載入：${whitelistArray.length} 筆資料`;
+                console.log("資料庫清單:", whitelistArray);
+
             } catch (err) {
-                dbStatus.textContent = "❌ whitelist.txt 讀取失敗";
+                console.error(err);
+                dbStatus.innerHTML = `<span class="error-msg">❌ 載入失敗: ${err.message}</span>`;
+                // 即使失敗也允許開啟相機測試，但會跳警告
+                statusMsg.textContent = "⚠️ 資料庫載入失敗，無法比對";
             }
         }
         loadWhitelist();
@@ -115,31 +137,26 @@
         // 2. 啟動相機
         startBtn.addEventListener('click', async () => {
             try {
-                // 請求相機權限
                 const stream = await navigator.mediaDevices.getUserMedia({ 
                     video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } } 
                 });
                 video.srcObject = stream;
-                
-                // 確保影片真的開始播放才啟用按鈕
                 video.onloadedmetadata = () => {
                     video.play();
                     scanBtn.disabled = false;
                     startBtn.style.display = 'none';
-                    statusMsg.textContent = "相機已啟動，請點擊開始掃描";
+                    statusMsg.textContent = "請點擊按鈕開始掃描";
                 };
             } catch (err) {
-                alert("無法啟動相機！請確認網址是 HTTPS 或是使用 localhost。錯誤訊息：" + err.message);
+                alert("相機啟動失敗 (請確認網址為 https) : " + err.message);
             }
         });
 
-        // 3. 影像處理 (自動對比度修正)
+        // 3. 影像處理 (自動對比度)
         function captureAndProcessImage() {
             const ctx = processedCanvas.getContext('2d');
             const vw = video.videoWidth;
             const vh = video.videoHeight;
-            
-            // 裁切畫面中央 (寬 75%, 高 30%)
             const cropW = vw * 0.75; 
             const cropH = cropW * 0.30; 
             const cropX = (vw - cropW) / 2;
@@ -152,10 +169,8 @@
             let imageData = ctx.getImageData(0, 0, cropW, cropH);
             let data = imageData.data;
             
-            // 簡單的亮度增強演算法
             for (let i = 0; i < data.length; i += 4) {
                 const gray = data[i] * 0.3 + data[i + 1] * 0.59 + data[i + 2] * 0.11;
-                // 二值化：大於 110 變全白，小於變全黑
                 const value = gray > 110 ? 255 : 0;
                 data[i] = data[i + 1] = data[i + 2] = value;
             }
@@ -163,15 +178,109 @@
             return processedCanvas.toDataURL('image/png');
         }
 
-        // 4. 容錯比對核心
+        // 4. 容錯比對
         function isFuzzyMatch(scanned, dbItem) {
-            // 長度檢查 (允許差 1 碼)
             if (Math.abs(scanned.length - dbItem.length) > 1) return false;
-
             let errors = 0;
             let i = 0, j = 0;
             while (i < scanned.length && j < dbItem.length) {
                 if (scanned[i] === dbItem[j]) {
-                    // 字元相同，繼續
                     i++; j++;
-                } else if (
+                } else if (CONFUSABLE_MAP[dbItem[j]] && CONFUSABLE_MAP[dbItem[j]].includes(scanned[i])) {
+                    i++; j++;
+                } else {
+                    errors++; i++; j++;
+                }
+            }
+            return errors <= 1; 
+        }
+
+        // 5. 掃描迴圈 (2次確認)
+        async function startScanningLoop() {
+            if (isScanning) return;
+            
+            // 防呆：如果資料庫沒載入，不給掃
+            if (whitelistArray.length === 0) {
+                alert("錯誤：會員資料庫尚未載入，請檢查 whitelist.txt");
+                return;
+            }
+
+            isScanning = true;
+            scanBtn.textContent = "🛑 掃描中 (點擊暫停)";
+            scanBtn.style.backgroundColor = "#dc3545";
+
+            while (isScanning) {
+                const dataUrl = captureAndProcessImage();
+
+                try {
+                    const { data: { text } } = await Tesseract.recognize(dataUrl, 'eng', {
+                        tessedit_pageseg_mode: '7',
+                        tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789- '
+                    });
+
+                    let tokens = text.split(/[\s\n]+/);
+                    let foundAny = false;
+
+                    for (let token of tokens) {
+                        let cleanText = token.replace(/[^A-Z0-9]/g, '');
+                        if (cleanText.length < 3) continue;
+
+                        for (let member of whitelistArray) {
+                            if (isFuzzyMatch(cleanText, member)) {
+                                foundAny = true;
+                                candidateMsg.textContent = `偵測: ${cleanText} -> ${member}`;
+                                
+                                if (!votePool[member]) votePool[member] = 0;
+                                votePool[member]++;
+
+                                let percent = (votePool[member] / VOTE_THRESHOLD) * 100;
+                                confidenceBar.style.width = `${Math.min(percent, 100)}%`;
+
+                                // 連續 2 次成功
+                                if (votePool[member] >= VOTE_THRESHOLD) {
+                                    statusMsg.innerHTML = `<div class="match-success">⭕ 通過！<br>${member}</div>`;
+                                    isScanning = false;
+                                    scanBtn.textContent = "✅ 完成 (點擊重置)";
+                                    scanBtn.style.backgroundColor = "#28a745";
+                                    return;
+                                }
+                                break;
+                            }
+                        }
+                        if (foundAny) break;
+                    }
+
+                    if (!foundAny) {
+                        for (let key in votePool) {
+                            if (votePool[key] > 0) votePool[key] -= 0.5;
+                        }
+                        let maxScore = 0;
+                        for(let k in votePool) maxScore = Math.max(maxScore, votePool[k]);
+                        confidenceBar.style.width = `${(maxScore / VOTE_THRESHOLD) * 100}%`;
+                        if(maxScore === 0) candidateMsg.textContent = "搜尋中...";
+                    }
+
+                } catch (err) { console.error(err); }
+                
+                await new Promise(r => setTimeout(r, 200));
+            }
+        }
+
+        scanBtn.addEventListener('click', () => {
+            if (isScanning) {
+                isScanning = false;
+                votePool = {};
+                confidenceBar.style.width = "0%";
+                candidateMsg.textContent = "---";
+                statusMsg.textContent = "已暫停";
+                scanBtn.textContent = "📸 開始掃描";
+                scanBtn.style.backgroundColor = "#28a745";
+            } else {
+                statusMsg.textContent = "請對準車牌...";
+                startScanningLoop();
+            }
+        });
+
+    </script>
+</body>
+</html>
