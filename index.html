@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>車牌辨識 (除錯修復+動畫版)</title>
+    <title>車牌辨識 (穩定版)</title>
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
     <style>
         body { font-family: "Microsoft JhengHei", monospace; text-align: center; padding: 10px; background: #000; color: white; }
@@ -16,7 +16,7 @@
         }
         video { width: 100%; height: 100%; object-fit: cover; }
         
-        /* 掃描框 */
+        /* 掃描框 (無動畫) */
         .scan-region {
             position: absolute; top: 50%; left: 50%; 
             transform: translate(-50%, -50%);
@@ -24,18 +24,6 @@
             border: 2px solid #00ff00; border-radius: 4px;
             box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.7);
             z-index: 10;
-        }
-
-        /* ★ 新增：掃描線動畫 ★ */
-        .scan-line {
-            position: absolute; width: 100%; height: 2px; background: #00ff00; top: 0;
-            animation: scanMove 2s infinite linear; /* 2秒來回一次 */
-            box-shadow: 0 0 6px #00ff00; /* 發光效果 */
-        }
-        @keyframes scanMove { 
-            0% { top: 0; } 
-            50% { top: 100%; } 
-            100% { top: 0; } 
         }
 
         .controls { margin-top: 10px; }
@@ -61,13 +49,11 @@
 </head>
 <body>
 
-    <h3>🛠️ 車牌辨識 (閾值=2)</h3>
+    <h3>🛠️ 車牌辨識 (穩定版)</h3>
 
     <div id="video-container">
         <video id="video" playsinline autoplay muted></video>
-        <div class="scan-region">
-            <div class="scan-line"></div>
-        </div>
+        <div class="scan-region"></div>
     </div>
 
     <div class="controls">
@@ -80,3 +66,238 @@
         <div id="progress-bar"></div>
         <div>OCR 原始讀取: <span id="rawText" class="raw-text">---</span></div>
         <div id="statusMsg" style="text-align:center; font-weight:bold;">等待操作</div>
+        
+        <div class="log-box" id="systemLog">
+            <div>[系統] 初始化完成...</div>
+        </div>
+    </div>
+
+    <canvas id="processedCanvas" style="display:none;"></canvas>
+
+    <script>
+        // ================= 設定區 =================
+        const VOTE_THRESHOLD = 2;   // 2 次成功就通過
+        const MIN_LENGTH = 2;       // 至少2碼
+        
+        const USER_CONFUSE_TABLE = {
+            '6': ['4', 'G', 'B', '8'],
+            '4': ['A', '6'],
+            '2': ['Z', '7'],
+            'Z': ['2'],
+            'B': ['8', 'D', '0'],
+            '8': ['B', '3', 'S'],
+            'D': ['0', 'O', 'Q'],
+            '0': ['D', 'O', 'Q'],
+            'O': ['0', 'D', 'Q'],
+            '1': ['I', 'L', 'T'],
+            'I': ['1']
+        };
+        // ==========================================
+
+        let whitelistArray = [];
+        let isScanning = false;
+        let votePool = {}; 
+        
+        const video = document.getElementById('video');
+        const startBtn = document.getElementById('startBtn');
+        const scanBtn = document.getElementById('scanBtn');
+        const statusMsg = document.getElementById('statusMsg');
+        const rawTextDisplay = document.getElementById('rawText');
+        const logBox = document.getElementById('systemLog');
+        const progressBar = document.getElementById('progress-bar');
+        const processedCanvas = document.getElementById('processedCanvas');
+
+        // 日誌功能
+        function log(msg, type='info') {
+            const div = document.createElement('div');
+            div.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+            if(type==='error') div.style.color = '#ff4d4d';
+            if(type==='success') div.style.color = '#4dff4d';
+            logBox.prepend(div);
+        }
+
+        // 1. 載入資料庫 (GitHub防快取)
+        async function loadWhitelist() {
+            try {
+                // 加入時間參數避免 GitHub 快取舊檔案
+                const timeStamp = new Date().getTime();
+                log("正在讀取 whitelist.txt...");
+                
+                const response = await fetch('whitelist.txt?t=' + timeStamp);
+                if (!response.ok) throw new Error("讀取失敗 (404)");
+                
+                const text = await response.text();
+                whitelistArray = text.split(/\r?\n/)
+                    .map(line => line.trim().replace(/[^a-zA-Z0-9]/g, '').toUpperCase())
+                    .filter(item => item.length > 0);
+                log(`✅ 資料庫載入: ${whitelistArray.length} 筆`, 'success');
+            } catch (err) {
+                log(`❌ 資料庫錯誤: ${err.message}`, 'error');
+                statusMsg.textContent = "資料庫讀取失敗";
+            }
+        }
+        loadWhitelist();
+
+        // 2. 啟動相機
+        startBtn.addEventListener('click', async () => {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } } 
+                });
+                video.srcObject = stream;
+                video.onloadedmetadata = () => { 
+                    video.play(); 
+                    scanBtn.disabled = false; 
+                    startBtn.style.display = 'none';
+                    log("相機已啟動");
+                };
+            } catch (err) { 
+                log(`❌ 相機啟動失敗: ${err.message}`, 'error'); 
+                alert("相機錯誤，請確認權限或HTTPS");
+            }
+        });
+
+        // 3. 影像處理 (自動對比度)
+        function captureAndProcessImage() {
+            try {
+                const ctx = processedCanvas.getContext('2d');
+                const vw = video.videoWidth;
+                const vh = video.videoHeight;
+                // 裁切
+                const cropW = vw * 0.75; 
+                const cropH = cropW * 0.35; 
+                const cropX = (vw - cropW) / 2;
+                const cropY = (vh - cropH) / 2;
+
+                processedCanvas.width = cropW;
+                processedCanvas.height = cropH;
+                ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
+
+                let imageData = ctx.getImageData(0, 0, cropW, cropH);
+                let data = imageData.data;
+                
+                // 二值化
+                for (let i = 0; i < data.length; i += 4) {
+                    const gray = data[i] * 0.3 + data[i + 1] * 0.59 + data[i + 2] * 0.11;
+                    const value = gray > 110 ? 255 : 0;
+                    data[i] = data[i + 1] = data[i + 2] = value;
+                }
+                ctx.putImageData(imageData, 0, 0);
+                return processedCanvas.toDataURL('image/png');
+            } catch (e) {
+                log("影像處理錯誤: " + e.message, 'error');
+                return null;
+            }
+        }
+
+        // 4. 容錯比對邏輯
+        function isFuzzyMatch(scanned, dbItem) {
+            if (Math.abs(scanned.length - dbItem.length) > 1) return false;
+            
+            let errors = 0;
+            let i = 0, j = 0;
+            
+            while (i < scanned.length && j < dbItem.length) {
+                const S = scanned[i];
+                const D = dbItem[j];
+                
+                if (S === D) {
+                    i++; j++;
+                } else if (USER_CONFUSE_TABLE[D] && USER_CONFUSE_TABLE[D].includes(S)) {
+                    i++; j++;
+                } else {
+                    errors++;
+                    i++; j++;
+                }
+            }
+            return errors <= 1; 
+        }
+
+        // 5. 主迴圈
+        async function startScanningLoop() {
+            if (isScanning) return;
+            isScanning = true;
+            scanBtn.textContent = "⏹ 停止掃描";
+            scanBtn.style.backgroundColor = "#dc3545";
+            log("開始掃描迴圈...", 'info');
+
+            while (isScanning) {
+                const dataUrl = captureAndProcessImage();
+                if (!dataUrl) { await new Promise(r=>setTimeout(r, 500)); continue; }
+
+                try {
+                    const { data: { text } } = await Tesseract.recognize(dataUrl, 'eng', {
+                        tessedit_pageseg_mode: '7',
+                        tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789- '
+                    });
+
+                    let cleanRaw = text.replace(/[\r\n]/g, '');
+                    rawTextDisplay.textContent = cleanRaw || "(無文字)";
+
+                    let tokens = text.split(/[\s\n]+/);
+                    let matchedInFrame = false;
+
+                    for (let token of tokens) {
+                        let scanned = token.replace(/[^A-Z0-9]/g, ''); 
+                        if (scanned.length < MIN_LENGTH) continue;
+
+                        for (let member of whitelistArray) {
+                            if (isFuzzyMatch(scanned, member)) {
+                                matchedInFrame = true;
+                                log(`比對成功: ${scanned} -> ${member}`);
+                                
+                                if (!votePool[member]) votePool[member] = 0;
+                                votePool[member]++;
+                                
+                                let percent = (votePool[member] / VOTE_THRESHOLD) * 100;
+                                progressBar.style.width = `${Math.min(percent, 100)}%`;
+
+                                if (votePool[member] >= VOTE_THRESHOLD) {
+                                    statusMsg.innerHTML = `<div class="match-success">⭕ 開門: ${member}</div>`;
+                                    log(`🎯 最終確認: ${member}`, 'success');
+                                    isScanning = false;
+                                    scanBtn.textContent = "✅ 完成 (點擊重置)";
+                                    scanBtn.style.backgroundColor = "#28a745";
+                                    return; 
+                                }
+                                break;
+                            }
+                        }
+                        if (matchedInFrame) break;
+                    }
+
+                    if (!matchedInFrame) {
+                        for (let k in votePool) {
+                            if (votePool[k] > 0) votePool[k] -= 0.2; 
+                        }
+                        let maxScore = 0;
+                        for(let k in votePool) maxScore = Math.max(maxScore, votePool[k]);
+                        progressBar.style.width = `${(maxScore / VOTE_THRESHOLD) * 100}%`;
+                    }
+
+                } catch (err) {
+                    log("OCR 錯誤: " + err.message, 'error');
+                }
+
+                await new Promise(r => setTimeout(r, 300)); 
+            }
+        }
+
+        scanBtn.addEventListener('click', () => {
+            if (isScanning) {
+                isScanning = false;
+                scanBtn.textContent = "📸 開始辨識";
+                scanBtn.style.backgroundColor = "#28a745";
+                statusMsg.textContent = "已暫停";
+                progressBar.style.width = "0%";
+                votePool = {};
+                log("使用者停止掃描");
+            } else {
+                statusMsg.textContent = "掃描中...";
+                startScanningLoop();
+            }
+        });
+
+    </script>
+</body>
+</html>
