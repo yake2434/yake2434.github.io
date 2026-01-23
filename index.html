@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>車牌辨識 (OpenCV 高階增強版)</title>
+    <title>車牌辨識 (攔截非會員版)</title>
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
     <script async src="https://docs.opencv.org/4.8.0/opencv.js" onload="onOpenCvReady();" type="text/javascript"></script>
     
@@ -38,19 +38,21 @@
         #result-area { margin-top: 10px; padding: 10px; background: #222; border-radius: 8px; text-align: left; }
         .log-box { font-size: 12px; color: #aaa; height: 100px; overflow-y: scroll; background: #111; padding: 5px; border: 1px solid #333; margin-top: 5px; }
         .raw-text { color: #ffc107; font-size: 1.1em; margin-bottom: 5px; }
-        .match-success { color: #4dff4d; font-size: 1.5em; font-weight: bold; text-align: center; margin: 10px 0; }
+        
+        .match-success { color: #4dff4d; font-size: 1.6em; font-weight: 900; text-align: center; margin: 10px 0; border: 2px solid #4dff4d; padding: 10px; }
+        .match-fail { color: #ff4d4d; font-size: 1.6em; font-weight: 900; text-align: center; margin: 10px 0; border: 2px solid #ff4d4d; padding: 10px; }
         
         #progress-bar { width: 0%; height: 5px; background: #00ff00; transition: width 0.2s; margin-bottom: 5px; }
         
-        /* 顯示處理後的黑白影像供除錯 */
+        /* 縮小預覽圖 */
         #processedCanvas { 
-            width: 200px; height: auto; border: 1px solid #555; margin-top: 10px; display: block; margin: 0 auto;
+            width: 150px; height: auto; border: 1px solid #555; margin-top: 10px; display: block; margin: 0 auto;
         }
     </style>
 </head>
 <body>
 
-    <h3>🛡️ 車牌辨識 (OpenCV 增強版)</h3>
+    <h3>🛡️ 車牌辨識 (攔截功能)</h3>
 
     <div id="video-container">
         <video id="video" playsinline autoplay muted></video>
@@ -58,27 +60,27 @@
     </div>
 
     <div class="controls">
-        <button id="startBtn" disabled>⏳ 載入 OpenCV 中...</button>
+        <button id="startBtn" disabled>⏳ 載入 OpenCV...</button>
         <br>
         <button id="scanBtn" class="scan-btn" disabled>📸 開始辨識</button>
     </div>
 
-    <div style="font-size:12px; color:#aaa; margin-top:5px;">電腦視覺 (AI眼中的車牌):</div>
+    <div style="font-size:12px; color:#aaa; margin-top:5px;">AI 視角:</div>
     <canvas id="processedCanvas"></canvas>
 
     <div id="result-area">
         <div id="progress-bar"></div>
-        <div>原始讀取: <span id="rawText" class="raw-text">---</span></div>
+        <div>OCR 讀取: <span id="rawText" class="raw-text">---</span></div>
         <div id="statusMsg" style="text-align:center; font-weight:bold;">等待操作</div>
         <div class="log-box" id="systemLog"><div>[系統] 初始化中...</div></div>
     </div>
 
     <script>
         // === 設定區 ===
-        const VOTE_THRESHOLD = 2;   
-        const MIN_LENGTH = 3;       
+        const SUCCESS_THRESHOLD = 2; // 連續 2 次是會員 -> 通過
+        const FAIL_THRESHOLD = 4;    // 連續 4 次非會員 -> 攔截
+        const MIN_LENGTH = 3;        // 至少 3 碼才算車牌
         
-        // 易混淆表
         const USER_CONFUSE_TABLE = {
             '6': ['4', 'G', 'B', '8'], '4': ['A', '6'], '2': ['Z', '7'], 'Z': ['2'],
             'B': ['8', 'D', '0'], '8': ['B', '3', 'S'], 'D': ['0', 'O', 'Q'],
@@ -89,7 +91,8 @@
         let cvReady = false;
         let whitelistArray = [];
         let isScanning = false;
-        let votePool = {}; 
+        let votePool = {};     // 會員積分池
+        let failCount = 0;     // 非會員連續次數
         
         const video = document.getElementById('video');
         const startBtn = document.getElementById('startBtn');
@@ -108,15 +111,15 @@
             logBox.prepend(div);
         }
 
-        // 0. OpenCV 載入回呼
+        // 0. OpenCV 準備
         function onOpenCvReady() {
             cvReady = true;
             startBtn.textContent = "1. 啟動相機 (4K)";
             startBtn.disabled = false;
-            log("✅ OpenCV 視覺庫載入完成", 'success');
+            log("✅ OpenCV 載入完成", 'success');
         }
 
-        // 1. 載入資料庫 (GitHub防快取)
+        // 1. 載入資料庫
         async function loadWhitelist() {
             try {
                 const timeStamp = new Date().getTime();
@@ -133,43 +136,39 @@
         }
         loadWhitelist();
 
-        // 2. 啟動相機 (請求超高畫質)
+        // 2. 啟動相機
         startBtn.addEventListener('click', async () => {
             try {
-                // ★ 關鍵：請求 1920x1080 (FHD) 甚至 4K
                 const constraints = {
                     video: { 
                         facingMode: "environment", 
                         width: { ideal: 1920 }, 
                         height: { ideal: 1080 },
-                        focusMode: "continuous" // 嘗試請求自動對焦
+                        focusMode: "continuous"
                     } 
                 };
-                
                 const stream = await navigator.mediaDevices.getUserMedia(constraints);
                 video.srcObject = stream;
                 video.onloadedmetadata = () => { 
                     video.play(); 
                     scanBtn.disabled = false; 
                     startBtn.style.display = 'none';
-                    log(`相機已啟動 (解析度: ${video.videoWidth}x${video.videoHeight})`);
+                    log(`相機已啟動 (${video.videoWidth}x${video.videoHeight})`);
                 };
             } catch (err) { 
                 log(`❌ 相機失敗: ${err.message}`, 'error'); 
-                alert("無法啟動高畫質相機");
             }
         });
 
-        // 3. OpenCV 影像增強處理 (核心差異)
+        // 3. OpenCV 影像處理
         function captureAndProcessImage() {
             if (!cvReady) return null;
-
             try {
                 const ctx = processedCanvas.getContext('2d');
                 const vw = video.videoWidth;
                 const vh = video.videoHeight;
                 
-                // 裁切：稍微縮小範圍專注中間
+                // 裁切
                 const cropW = vw * 0.6; 
                 const cropH = cropW * 0.35; 
                 const cropX = (vw - cropW) / 2;
@@ -179,30 +178,19 @@
                 processedCanvas.height = cropH;
                 ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
 
-                // --- OpenCV 魔法開始 ---
                 let src = cv.imread(processedCanvas);
                 let dst = new cv.Mat();
                 
-                // A. 轉灰階
                 cv.cvtColor(src, src, cv.COLOR_RGBA2GRAY, 0);
-                
-                // B. 自適應二值化 (Adaptive Thresholding)
-                // 這比單純的 if(gray>100) 強大太多，它能抵抗陰影
-                // 參數說明: 255(最大值), ADAPTIVE_THRESH_GAUSSIAN_C(演算法), THRESH_BINARY(黑白), 31(區塊大小), 2(常數)
+                // 自適應二值化
                 cv.adaptiveThreshold(src, dst, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 31, 2);
 
-                // C. 顯示處理結果並回傳
                 cv.imshow('processedCanvas', dst);
                 const dataUrl = processedCanvas.toDataURL('image/png');
-                
-                // 釋放記憶體 (非常重要，否則瀏覽器會崩潰)
-                src.delete();
-                dst.delete();
-
+                src.delete(); dst.delete();
                 return dataUrl;
 
             } catch (e) {
-                log("OpenCV 處理錯誤: " + e.message, 'error');
                 return null;
             }
         }
@@ -221,15 +209,16 @@
             return errors <= 1; 
         }
 
-        // 5. 掃描迴圈
+        // 5. 掃描迴圈 (含失敗邏輯)
         async function startScanningLoop() {
             if (isScanning) return;
             isScanning = true;
+            votePool = {}; // 清空成功積分
+            failCount = 0; // 清空失敗計數
             scanBtn.textContent = "🛑 掃描中...";
             scanBtn.style.backgroundColor = "#dc3545";
 
             while (isScanning) {
-                // 使用 OpenCV 處理過的圖片
                 const dataUrl = captureAndProcessImage();
                 if (!dataUrl) { await new Promise(r=>setTimeout(r, 500)); continue; }
 
@@ -240,64 +229,100 @@
                     });
 
                     let cleanRaw = text.replace(/[\r\n]/g, '');
-                    rawTextDisplay.textContent = cleanRaw || "(無文字)";
+                    rawTextDisplay.textContent = cleanRaw || "...";
 
                     let tokens = text.split(/[\s\n]+/);
-                    let matchedInFrame = false;
+                    let foundMemberInFrame = false;
+                    let foundAnyValidPlate = false; // 這一幀有沒有看到任何像車牌的東西
+
+                    // 候選字串 (用於顯示非會員車號)
+                    let topCandidate = "";
 
                     for (let token of tokens) {
                         let scanned = token.replace(/[^A-Z0-9]/g, ''); 
-                        if (scanned.length < MIN_LENGTH) continue;
+                        // 過濾: 至少 3 碼且必須包含數字 (過濾純英文招牌)
+                        if (scanned.length < MIN_LENGTH || !/[0-9]/.test(scanned)) continue;
 
+                        foundAnyValidPlate = true;
+                        topCandidate = scanned;
+
+                        // 比對會員
                         for (let member of whitelistArray) {
                             if (isFuzzyMatch(scanned, member)) {
-                                matchedInFrame = true;
+                                foundMemberInFrame = true;
                                 log(`比對成功: ${scanned} -> ${member}`);
+                                
+                                // ★ 發現會員 -> 失敗計數器歸零
+                                failCount = 0; 
+
                                 if (!votePool[member]) votePool[member] = 0;
                                 votePool[member]++;
-                                let percent = (votePool[member] / VOTE_THRESHOLD) * 100;
+                                
+                                let percent = (votePool[member] / SUCCESS_THRESHOLD) * 100;
                                 progressBar.style.width = `${Math.min(percent, 100)}%`;
+                                progressBar.style.backgroundColor = "#00ff00";
 
-                                if (votePool[member] >= VOTE_THRESHOLD) {
-                                    statusMsg.innerHTML = `<div class="match-success">⭕ 開門: ${member}</div>`;
-                                    log(`🎯 最終確認: ${member}`, 'success');
-                                    isScanning = false;
-                                    scanBtn.textContent = "✅ 完成 (點擊重置)";
-                                    scanBtn.style.backgroundColor = "#28a745";
+                                if (votePool[member] >= SUCCESS_THRESHOLD) {
+                                    statusMsg.innerHTML = `<div class="match-success">⭕ 會員通行<br>${member}</div>`;
+                                    log(`🎯 會員確認: ${member}`, 'success');
+                                    stopScan(true);
                                     return; 
                                 }
                                 break;
                             }
                         }
-                        if (matchedInFrame) break;
+                        if (foundMemberInFrame) break;
                     }
 
-                    if (!matchedInFrame) {
-                        for (let k in votePool) {
-                            if (votePool[k] > 0) votePool[k] -= 0.2; 
+                    // --- 判斷邏輯 ---
+                    if (!foundMemberInFrame) {
+                        // 沒找到會員，但有看到像車牌的東西 -> 可能是非會員
+                        if (foundAnyValidPlate) {
+                            failCount++;
+                            let progress = (failCount / FAIL_THRESHOLD) * 100;
+                            // 失敗進度條用紅色顯示
+                            progressBar.style.width = `${progress}%`;
+                            progressBar.style.backgroundColor = "#ff4d4d";
+                            
+                            statusMsg.textContent = `非會員偵測中 (${failCount}/${FAIL_THRESHOLD})...`;
+                            log(`⚠️ 偵測到未知車輛: ${topCandidate} (${failCount})`);
+
+                            if (failCount >= FAIL_THRESHOLD) {
+                                statusMsg.innerHTML = `<div class="match-fail">❌ 非會員車<br>${topCandidate}</div>`;
+                                log(`⛔ 攔截非會員: ${topCandidate}`, 'error');
+                                stopScan(false); // 停止掃描
+                                return;
+                            }
+                        } else {
+                            // 什麼都沒看到 (模糊或無字) -> 不算失敗，維持現狀
+                            // 也可以選擇讓積分慢慢衰退
                         }
-                        let maxScore = 0;
-                        for(let k in votePool) maxScore = Math.max(maxScore, votePool[k]);
-                        progressBar.style.width = `${(maxScore / VOTE_THRESHOLD) * 100}%`;
                     }
 
                 } catch (err) {
-                    // Tesseract 有時會報錯，忽略即可
+                    // Tesseract error
                 }
 
                 await new Promise(r => setTimeout(r, 200)); 
             }
         }
 
+        function stopScan(isSuccess) {
+            isScanning = false;
+            scanBtn.textContent = isSuccess ? "✅ 完成 (點擊重置)" : "⛔ 已攔截 (點擊重置)";
+            scanBtn.style.backgroundColor = isSuccess ? "#28a745" : "#ff4d4d";
+        }
+
         scanBtn.addEventListener('click', () => {
             if (isScanning) {
+                // 手動暫停
                 isScanning = false;
                 scanBtn.textContent = "📸 開始辨識";
                 scanBtn.style.backgroundColor = "#28a745";
                 statusMsg.textContent = "已暫停";
                 progressBar.style.width = "0%";
-                votePool = {};
             } else {
+                // 開始/重置
                 statusMsg.textContent = "掃描中...";
                 startScanningLoop();
             }
