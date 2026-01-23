@@ -3,12 +3,13 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>車牌辨識 (穩定版)</title>
+    <title>車牌辨識 (OpenCV 高階增強版)</title>
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+    <script async src="https://docs.opencv.org/4.8.0/opencv.js" onload="onOpenCvReady();" type="text/javascript"></script>
+    
     <style>
         body { font-family: "Microsoft JhengHei", monospace; text-align: center; padding: 10px; background: #000; color: white; }
         
-        /* 視訊區塊 */
         #video-container { 
             position: relative; margin: 0 auto; 
             width: 100%; max-width: 640px; height: 360px;
@@ -16,11 +17,11 @@
         }
         video { width: 100%; height: 100%; object-fit: cover; }
         
-        /* 掃描框 (無動畫) */
+        /* 掃描框 */
         .scan-region {
             position: absolute; top: 50%; left: 50%; 
             transform: translate(-50%, -50%);
-            width: 80%; height: 30%; 
+            width: 75%; height: 25%; 
             border: 2px solid #00ff00; border-radius: 4px;
             box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.7);
             z-index: 10;
@@ -34,22 +35,22 @@
         button.scan-btn { background-color: #28a745; width: 90%; font-size: 1.2em; font-weight: bold; padding: 15px; }
         button:disabled { background-color: #222; color: #555; }
 
-        /* 結果與日誌區 */
         #result-area { margin-top: 10px; padding: 10px; background: #222; border-radius: 8px; text-align: left; }
-        .log-box { 
-            font-size: 12px; color: #aaa; height: 100px; overflow-y: scroll; 
-            background: #111; padding: 5px; border: 1px solid #333; margin-top: 5px;
-        }
+        .log-box { font-size: 12px; color: #aaa; height: 100px; overflow-y: scroll; background: #111; padding: 5px; border: 1px solid #333; margin-top: 5px; }
         .raw-text { color: #ffc107; font-size: 1.1em; margin-bottom: 5px; }
         .match-success { color: #4dff4d; font-size: 1.5em; font-weight: bold; text-align: center; margin: 10px 0; }
         
-        /* 信心條 */
         #progress-bar { width: 0%; height: 5px; background: #00ff00; transition: width 0.2s; margin-bottom: 5px; }
+        
+        /* 顯示處理後的黑白影像供除錯 */
+        #processedCanvas { 
+            width: 200px; height: auto; border: 1px solid #555; margin-top: 10px; display: block; margin: 0 auto;
+        }
     </style>
 </head>
 <body>
 
-    <h3>🛠️ 車牌辨識 (穩定版)</h3>
+    <h3>🛡️ 車牌辨識 (OpenCV 增強版)</h3>
 
     <div id="video-container">
         <video id="video" playsinline autoplay muted></video>
@@ -57,43 +58,35 @@
     </div>
 
     <div class="controls">
-        <button id="startBtn">1. 啟動相機</button>
+        <button id="startBtn" disabled>⏳ 載入 OpenCV 中...</button>
         <br>
-        <button id="scanBtn" class="scan-btn" disabled>2. 開始辨識</button>
+        <button id="scanBtn" class="scan-btn" disabled>📸 開始辨識</button>
     </div>
+
+    <div style="font-size:12px; color:#aaa; margin-top:5px;">電腦視覺 (AI眼中的車牌):</div>
+    <canvas id="processedCanvas"></canvas>
 
     <div id="result-area">
         <div id="progress-bar"></div>
-        <div>OCR 原始讀取: <span id="rawText" class="raw-text">---</span></div>
+        <div>原始讀取: <span id="rawText" class="raw-text">---</span></div>
         <div id="statusMsg" style="text-align:center; font-weight:bold;">等待操作</div>
-        
-        <div class="log-box" id="systemLog">
-            <div>[系統] 初始化完成...</div>
-        </div>
+        <div class="log-box" id="systemLog"><div>[系統] 初始化中...</div></div>
     </div>
 
-    <canvas id="processedCanvas" style="display:none;"></canvas>
-
     <script>
-        // ================= 設定區 =================
-        const VOTE_THRESHOLD = 2;   // 2 次成功就通過
-        const MIN_LENGTH = 2;       // 至少2碼
+        // === 設定區 ===
+        const VOTE_THRESHOLD = 2;   
+        const MIN_LENGTH = 3;       
         
+        // 易混淆表
         const USER_CONFUSE_TABLE = {
-            '6': ['4', 'G', 'B', '8'],
-            '4': ['A', '6'],
-            '2': ['Z', '7'],
-            'Z': ['2'],
-            'B': ['8', 'D', '0'],
-            '8': ['B', '3', 'S'],
-            'D': ['0', 'O', 'Q'],
-            '0': ['D', 'O', 'Q'],
-            'O': ['0', 'D', 'Q'],
-            '1': ['I', 'L', 'T'],
-            'I': ['1']
+            '6': ['4', 'G', 'B', '8'], '4': ['A', '6'], '2': ['Z', '7'], 'Z': ['2'],
+            'B': ['8', 'D', '0'], '8': ['B', '3', 'S'], 'D': ['0', 'O', 'Q'],
+            '0': ['D', 'O', 'Q'], 'O': ['0', 'D', 'Q'], '1': ['I', 'L', 'T'], 'I': ['1']
         };
-        // ==========================================
+        // =============
 
+        let cvReady = false;
         let whitelistArray = [];
         let isScanning = false;
         let votePool = {}; 
@@ -107,7 +100,6 @@
         const progressBar = document.getElementById('progress-bar');
         const processedCanvas = document.getElementById('processedCanvas');
 
-        // 日誌功能
         function log(msg, type='info') {
             const div = document.createElement('div');
             div.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
@@ -116,16 +108,20 @@
             logBox.prepend(div);
         }
 
+        // 0. OpenCV 載入回呼
+        function onOpenCvReady() {
+            cvReady = true;
+            startBtn.textContent = "1. 啟動相機 (4K)";
+            startBtn.disabled = false;
+            log("✅ OpenCV 視覺庫載入完成", 'success');
+        }
+
         // 1. 載入資料庫 (GitHub防快取)
         async function loadWhitelist() {
             try {
-                // 加入時間參數避免 GitHub 快取舊檔案
                 const timeStamp = new Date().getTime();
-                log("正在讀取 whitelist.txt...");
-                
                 const response = await fetch('whitelist.txt?t=' + timeStamp);
-                if (!response.ok) throw new Error("讀取失敗 (404)");
-                
+                if (!response.ok) throw new Error("404");
                 const text = await response.text();
                 whitelistArray = text.split(/\r?\n/)
                     .map(line => line.trim().replace(/[^a-zA-Z0-9]/g, '').toUpperCase())
@@ -133,38 +129,48 @@
                 log(`✅ 資料庫載入: ${whitelistArray.length} 筆`, 'success');
             } catch (err) {
                 log(`❌ 資料庫錯誤: ${err.message}`, 'error');
-                statusMsg.textContent = "資料庫讀取失敗";
             }
         }
         loadWhitelist();
 
-        // 2. 啟動相機
+        // 2. 啟動相機 (請求超高畫質)
         startBtn.addEventListener('click', async () => {
             try {
-                const stream = await navigator.mediaDevices.getUserMedia({ 
-                    video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } } 
-                });
+                // ★ 關鍵：請求 1920x1080 (FHD) 甚至 4K
+                const constraints = {
+                    video: { 
+                        facingMode: "environment", 
+                        width: { ideal: 1920 }, 
+                        height: { ideal: 1080 },
+                        focusMode: "continuous" // 嘗試請求自動對焦
+                    } 
+                };
+                
+                const stream = await navigator.mediaDevices.getUserMedia(constraints);
                 video.srcObject = stream;
                 video.onloadedmetadata = () => { 
                     video.play(); 
                     scanBtn.disabled = false; 
                     startBtn.style.display = 'none';
-                    log("相機已啟動");
+                    log(`相機已啟動 (解析度: ${video.videoWidth}x${video.videoHeight})`);
                 };
             } catch (err) { 
-                log(`❌ 相機啟動失敗: ${err.message}`, 'error'); 
-                alert("相機錯誤，請確認權限或HTTPS");
+                log(`❌ 相機失敗: ${err.message}`, 'error'); 
+                alert("無法啟動高畫質相機");
             }
         });
 
-        // 3. 影像處理 (自動對比度)
+        // 3. OpenCV 影像增強處理 (核心差異)
         function captureAndProcessImage() {
+            if (!cvReady) return null;
+
             try {
                 const ctx = processedCanvas.getContext('2d');
                 const vw = video.videoWidth;
                 const vh = video.videoHeight;
-                // 裁切
-                const cropW = vw * 0.75; 
+                
+                // 裁切：稍微縮小範圍專注中間
+                const cropW = vw * 0.6; 
                 const cropH = cropW * 0.35; 
                 const cropX = (vw - cropW) / 2;
                 const cropY = (vh - cropH) / 2;
@@ -173,55 +179,57 @@
                 processedCanvas.height = cropH;
                 ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
 
-                let imageData = ctx.getImageData(0, 0, cropW, cropH);
-                let data = imageData.data;
+                // --- OpenCV 魔法開始 ---
+                let src = cv.imread(processedCanvas);
+                let dst = new cv.Mat();
                 
-                // 二值化
-                for (let i = 0; i < data.length; i += 4) {
-                    const gray = data[i] * 0.3 + data[i + 1] * 0.59 + data[i + 2] * 0.11;
-                    const value = gray > 110 ? 255 : 0;
-                    data[i] = data[i + 1] = data[i + 2] = value;
-                }
-                ctx.putImageData(imageData, 0, 0);
-                return processedCanvas.toDataURL('image/png');
+                // A. 轉灰階
+                cv.cvtColor(src, src, cv.COLOR_RGBA2GRAY, 0);
+                
+                // B. 自適應二值化 (Adaptive Thresholding)
+                // 這比單純的 if(gray>100) 強大太多，它能抵抗陰影
+                // 參數說明: 255(最大值), ADAPTIVE_THRESH_GAUSSIAN_C(演算法), THRESH_BINARY(黑白), 31(區塊大小), 2(常數)
+                cv.adaptiveThreshold(src, dst, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 31, 2);
+
+                // C. 顯示處理結果並回傳
+                cv.imshow('processedCanvas', dst);
+                const dataUrl = processedCanvas.toDataURL('image/png');
+                
+                // 釋放記憶體 (非常重要，否則瀏覽器會崩潰)
+                src.delete();
+                dst.delete();
+
+                return dataUrl;
+
             } catch (e) {
-                log("影像處理錯誤: " + e.message, 'error');
+                log("OpenCV 處理錯誤: " + e.message, 'error');
                 return null;
             }
         }
 
-        // 4. 容錯比對邏輯
+        // 4. 容錯比對
         function isFuzzyMatch(scanned, dbItem) {
             if (Math.abs(scanned.length - dbItem.length) > 1) return false;
-            
             let errors = 0;
             let i = 0, j = 0;
-            
             while (i < scanned.length && j < dbItem.length) {
-                const S = scanned[i];
-                const D = dbItem[j];
-                
-                if (S === D) {
-                    i++; j++;
-                } else if (USER_CONFUSE_TABLE[D] && USER_CONFUSE_TABLE[D].includes(S)) {
-                    i++; j++;
-                } else {
-                    errors++;
-                    i++; j++;
-                }
+                const S = scanned[i]; const D = dbItem[j];
+                if (S === D) { i++; j++; }
+                else if (USER_CONFUSE_TABLE[D] && USER_CONFUSE_TABLE[D].includes(S)) { i++; j++; }
+                else { errors++; i++; j++; }
             }
             return errors <= 1; 
         }
 
-        // 5. 主迴圈
+        // 5. 掃描迴圈
         async function startScanningLoop() {
             if (isScanning) return;
             isScanning = true;
-            scanBtn.textContent = "⏹ 停止掃描";
+            scanBtn.textContent = "🛑 掃描中...";
             scanBtn.style.backgroundColor = "#dc3545";
-            log("開始掃描迴圈...", 'info');
 
             while (isScanning) {
+                // 使用 OpenCV 處理過的圖片
                 const dataUrl = captureAndProcessImage();
                 if (!dataUrl) { await new Promise(r=>setTimeout(r, 500)); continue; }
 
@@ -245,10 +253,8 @@
                             if (isFuzzyMatch(scanned, member)) {
                                 matchedInFrame = true;
                                 log(`比對成功: ${scanned} -> ${member}`);
-                                
                                 if (!votePool[member]) votePool[member] = 0;
                                 votePool[member]++;
-                                
                                 let percent = (votePool[member] / VOTE_THRESHOLD) * 100;
                                 progressBar.style.width = `${Math.min(percent, 100)}%`;
 
@@ -276,10 +282,10 @@
                     }
 
                 } catch (err) {
-                    log("OCR 錯誤: " + err.message, 'error');
+                    // Tesseract 有時會報錯，忽略即可
                 }
 
-                await new Promise(r => setTimeout(r, 300)); 
+                await new Promise(r => setTimeout(r, 200)); 
             }
         }
 
@@ -291,7 +297,6 @@
                 statusMsg.textContent = "已暫停";
                 progressBar.style.width = "0%";
                 votePool = {};
-                log("使用者停止掃描");
             } else {
                 statusMsg.textContent = "掃描中...";
                 startScanningLoop();
