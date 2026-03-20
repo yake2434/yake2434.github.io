@@ -2,154 +2,261 @@
 <html lang="zh-TW">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>車牌辨識系統 (TXT版)</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>車牌辨識 (手動拍照 + 外部名單)</title>
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
     <style>
-        body { font-family: "Microsoft JhengHei", sans-serif; text-align: center; padding: 20px; background: #f0f2f5; }
-        #video-container { position: relative; margin: 0 auto; max-width: 100%; width: 640px; }
-        video { width: 100%; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-        .overlay {
-            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
-            width: 80%; height: 100px; border: 2px solid #00ff00; box-shadow: 0 0 20px rgba(0,255,0,0.2);
+        body { font-family: "Microsoft JhengHei", sans-serif; text-align: center; padding: 10px; background: #000; color: white; margin: 0; }
+        
+        #video-container { 
+            position: relative; margin: 0 auto; 
+            width: 100%; max-width: 640px; height: 360px;
+            background: #222; overflow: hidden; border-radius: 8px; border: 1px solid #444;
+        }
+        video { width: 100%; height: 100%; object-fit: cover; }
+        
+        /* 輔助對焦框 */
+        .scan-region {
+            position: absolute; top: 50%; left: 50%; 
+            transform: translate(-50%, -50%);
+            width: 75%; height: 30%; 
+            border: 3px solid #00ff00; border-radius: 6px;
+            box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.6); 
             z-index: 10; pointer-events: none;
         }
-        .controls { margin-top: 20px; }
+        .focus-text { position: absolute; top: -30px; left: 0; width: 100%; color: #00ff00; font-weight: bold; }
+
+        .controls { margin-top: 15px; }
         button {
-            padding: 12px 24px; font-size: 18px; border: none; border-radius: 50px;
-            background-color: #007bff; color: white; cursor: pointer; margin: 5px;
+            padding: 15px 24px; font-size: 18px; border: none; border-radius: 50px;
+            cursor: pointer; font-weight: bold; transition: 0.1s; margin: 5px;
         }
-        button:disabled { background-color: #ccc; }
-        button.scan-btn { background-color: #28a745; }
-        #result-area { margin-top: 20px; padding: 15px; background: white; border-radius: 8px; }
-        .status { font-weight: bold; margin-top: 10px; font-size: 1.1em; }
-        .match-success { color: #28a745; font-size: 1.5em; font-weight: 900; }
-        .match-fail { color: #dc3545; font-size: 1.5em; font-weight: 900; }
-        input { font-size: 18px; padding: 8px; width: 150px; text-transform: uppercase; text-align: center; }
-        .db-info { color: #666; font-size: 0.9em; margin-bottom: 15px; }
+        #startBtn { background-color: #007bff; color: white; width: 80%; }
+        #captureBtn { background-color: #28a745; color: white; width: 80%; font-size: 1.4em; padding: 20px; display: none; }
+        button:active { transform: scale(0.95); }
+        button:disabled { background-color: #555; color: #888; transform: none; }
+
+        #result-area { margin-top: 15px; padding: 15px; background: #222; border-radius: 12px; min-height: 100px; }
+        .match-success { color: #4dff4d; font-size: 2em; font-weight: 900; }
+        .match-fail { color: #ff4d4d; font-size: 1.5em; font-weight: bold; }
+        .raw-text { color: #aaa; font-size: 1em; margin-top: 10px; }
+
+        #processedCanvas { 
+            width: 200px; height: auto; border: 1px solid #555; margin-top: 10px; display: block; margin: 0 auto;
+        }
     </style>
 </head>
 <body>
 
-    <h2>🚗 會員車牌辨識 (離線版)</h2>
-    <div id="dbStatus" class="db-info">正在載入會員名單...</div>
+    <h3>📸 車牌辨識 (手動拍照版)</h3>
+    <div id="dbStatus" style="font-size: 12px; color: #aaa; margin-bottom: 10px;">資料庫連線中...</div>
 
     <div id="video-container">
-        <video id="video" playsinline autoplay></video>
-        <div class="overlay"></div>
+        <video id="video" playsinline autoplay muted></video>
+        <div class="scan-region">
+            <div class="focus-text">對準並保持清晰後拍照</div>
+        </div>
     </div>
-    
-    <canvas id="canvas" style="display:none;"></canvas>
 
     <div class="controls">
-        <button id="startBtn">啟動相機</button>
-        <button id="scanBtn" class="scan-btn" disabled>📸 掃描並比對</button>
+        <button id="startBtn">1. 啟動相機</button>
+        <button id="captureBtn">📸 拍照辨識</button>
     </div>
 
+    <div style="font-size:12px; color:#aaa; margin-top:5px;">電腦實際辨識的影像:</div>
+    <canvas id="processedCanvas"></canvas>
+
     <div id="result-area">
-        <p>辨識結果：<input type="text" id="manualInput" placeholder="OCR結果"></p>
-        <button onclick="checkMembership()">🔍 手動查詢</button>
-        <div id="statusMsg" class="status">等待操作...</div>
+        <div id="statusMsg" style="font-size:1.2em;">等待拍攝...</div>
+        <div id="rawText" class="raw-text"></div>
     </div>
 
     <script>
-        // 變數設定
-        let whitelistSet = new Set(); // 使用 Set 結構，比對速度最快
+        let whitelistArray = [];
         const video = document.getElementById('video');
-        const canvas = document.getElementById('canvas');
         const startBtn = document.getElementById('startBtn');
-        const scanBtn = document.getElementById('scanBtn');
+        const captureBtn = document.getElementById('captureBtn');
         const statusMsg = document.getElementById('statusMsg');
-        const manualInput = document.getElementById('manualInput');
+        const rawTextDisplay = document.getElementById('rawText');
+        const processedCanvas = document.getElementById('processedCanvas');
         const dbStatus = document.getElementById('dbStatus');
 
-        // 1. 網頁開啟時，立刻讀取 txt 檔案
+        // 易混淆表
+        const CONFUSABLE_MAP = {
+            '4': ['6', 'A'], '6': ['4', 'G', '8', '0', 'B'], 
+            'Z': ['2', '7'], '2': ['Z'],
+            'B': ['8', 'D', '0', '6'], '8': ['B', '3', 'S', '6'],
+            'D': ['0', 'O', 'Q'], '0': ['D', 'O', 'Q'], 'O': ['0', 'D', 'Q'],
+            'S': ['5'], '5': ['S'], 'I': ['1'], '1': ['I', 'T']
+        };
+
+        // 1. 載入外部資料庫 (加入時間戳記防 GitHub 快取)
         async function loadWhitelist() {
             try {
-                // 這裡讀取同目錄下的 whitelist.txt
-                const response = await fetch('whitelist.txt');
-                if (!response.ok) throw new Error("找不到 whitelist.txt 檔案");
+                const timeStamp = new Date().getTime();
+                const response = await fetch('whitelist.txt?t=' + timeStamp);
+                
+                if (!response.ok) {
+                    if (response.status === 404) throw new Error("找不到檔案 (404)，請檢查檔名是否為全小寫的 whitelist.txt");
+                    throw new Error(`讀取失敗 (HTTP ${response.status})`);
+                }
                 
                 const text = await response.text();
+                whitelistArray = text.split(/\r?\n/)
+                    .map(line => line.trim().replace(/[^a-zA-Z0-9]/g, '').toUpperCase())
+                    .filter(item => item.length > 0);
                 
-                // 將文字檔依據換行符號切割，並清理空白與轉大寫
-                const lines = text.split(/\r?\n/);
-                lines.forEach(line => {
-                    const cleanPlate = line.trim().toUpperCase();
-                    if (cleanPlate) {
-                        whitelistSet.add(cleanPlate); // 加入資料庫
-                    }
-                });
-
-                dbStatus.textContent = `✅ 會員資料庫已載入：共 ${whitelistSet.size} 筆資料`;
-                console.log("資料庫載入成功", whitelistSet);
+                if (whitelistArray.length === 0) throw new Error("檔案內容是空的");
+                
+                dbStatus.innerHTML = `✅ 資料庫已載入：${whitelistArray.length} 筆會員`;
             } catch (err) {
-                console.error(err);
-                dbStatus.innerHTML = `<span style="color:red">⚠️ 資料庫載入失敗：${err.message}<br>(請確認您是用伺服器模式開啟，而非直接點兩下 html 檔案)</span>`;
+                dbStatus.innerHTML = `<span style="color:#ff4d4d;">❌ 載入失敗: ${err.message}</span>`;
             }
         }
         
-        // 執行載入
+        // 網頁載入時立刻執行
         loadWhitelist();
 
         // 2. 啟動相機
         startBtn.addEventListener('click', async () => {
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({ 
-                    video: { facingMode: "environment" } 
+                    video: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } } 
                 });
                 video.srcObject = stream;
-                scanBtn.disabled = false;
-                startBtn.style.display = 'none';
-                statusMsg.textContent = "請將車牌對準綠框";
+                video.onloadedmetadata = () => {
+                    video.play();
+                    startBtn.style.display = 'none';
+                    captureBtn.style.display = 'inline-block';
+                };
             } catch (err) {
-                alert("相機啟動失敗，請確認網址為 https 或 localhost");
+                alert("無法啟動相機：" + err.message);
             }
         });
 
-        // 3. 掃描與辨識
-        scanBtn.addEventListener('click', async () => {
-            statusMsg.textContent = "🔄 影像辨識中...";
+        // 3. 擷取並增強影像 (二值化)
+        function captureAndProcessImage() {
+            const ctx = processedCanvas.getContext('2d');
+            const vw = video.videoWidth;
+            const vh = video.videoHeight;
             
-            canvas.width = video.videoWidth;
-            canvas.height = video.videoHeight;
-            const ctx = canvas.getContext('2d');
-            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-            const dataUrl = canvas.toDataURL('image/png');
+            // 裁切畫面中央
+            const cropW = vw * 0.75; 
+            const cropH = cropW * 0.30; 
+            const cropX = (vw - cropW) / 2;
+            const cropY = (vh - cropH) / 2;
 
-            try {
-                const { data: { text } } = await Tesseract.recognize(dataUrl, 'eng');
-                // 移除非英數字元
-                const cleanText = text.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
-                
-                if (cleanText.length < 2) {
-                    statusMsg.textContent = "⚠️ 畫面模糊，請重試";
+            processedCanvas.width = cropW;
+            processedCanvas.height = cropH;
+            ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
+
+            let imageData = ctx.getImageData(0, 0, cropW, cropH);
+            let data = imageData.data;
+            
+            // 自動色階與二值化
+            let min = 255, max = 0;
+            for (let i = 0; i < data.length; i += 4) {
+                const gray = data[i] * 0.3 + data[i + 1] * 0.59 + data[i + 2] * 0.11;
+                if (gray < min) min = gray;
+                if (gray > max) max = gray;
+            }
+            if (max === min) max = min + 1;
+
+            for (let i = 0; i < data.length; i += 4) {
+                let gray = data[i] * 0.3 + data[i + 1] * 0.59 + data[i + 2] * 0.11;
+                let normalized = (gray - min) / (max - min) * 255;
+                // 門檻設定在 120
+                let value = normalized > 120 ? 255 : 0;
+                data[i] = data[i + 1] = data[i + 2] = value;
+            }
+            ctx.putImageData(imageData, 0, 0);
+            return processedCanvas.toDataURL('image/png');
+        }
+
+        // 4. 容錯比對
+        function isFuzzyMatch(scanned, dbItem) {
+            if (Math.abs(scanned.length - dbItem.length) > 1) return false;
+            let errors = 0;
+            let i = 0, j = 0;
+            while (i < scanned.length && j < dbItem.length) {
+                if (scanned[i] === dbItem[j]) {
+                    i++; j++;
+                } else if (CONFUSABLE_MAP[dbItem[j]] && CONFUSABLE_MAP[dbItem[j]].includes(scanned[i])) {
+                    i++; j++;
                 } else {
-                    manualInput.value = cleanText;
-                    checkMembership(cleanText);
+                    errors++; i++; j++;
                 }
-            } catch (err) {
-                statusMsg.textContent = "❌ 辨識錯誤";
             }
-        });
+            return errors <= 1; 
+        }
 
-        // 4. 比對邏輯 (修改為讀取本地 Set)
-        function checkMembership(plateNumber = null) {
-            const queryPlate = plateNumber || manualInput.value.toUpperCase();
-            
-            if (!queryPlate) {
-                alert("請輸入車牌");
+        // 5. 拍照辨識核心邏輯
+        captureBtn.addEventListener('click', async () => {
+            // 防呆：如果資料庫沒載入，擋下來
+            if (whitelistArray.length === 0) {
+                alert("請等待資料庫載入完成，或檢查 whitelist.txt 是否存在！");
                 return;
             }
 
-            // 直接在記憶體中比對，速度極快
-            if (whitelistSet.has(queryPlate)) {
-                statusMsg.innerHTML = `<div class="match-success">⭕ 通過<br>車號 ${queryPlate} 是會員</div>`;
-                // 這裡可以播放成功音效
-            } else {
-                statusMsg.innerHTML = `<div class="match-fail">❌ 攔截<br>車號 ${queryPlate} 非會員</div>`;
+            // UI 狀態：處理中
+            captureBtn.disabled = true;
+            captureBtn.textContent = "⏳ 分析中...";
+            statusMsg.innerHTML = '<span style="color:#ffc107;">AI 讀取中，請稍候...</span>';
+            rawTextDisplay.textContent = "";
+
+            // 擷取影像
+            const dataUrl = captureAndProcessImage();
+
+            try {
+                // 呼叫 Tesseract 進行單次辨識
+                const { data: { text } } = await Tesseract.recognize(dataUrl, 'eng', {
+                    tessedit_pageseg_mode: '7',
+                    tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789- '
+                });
+
+                let tokens = text.split(/[\s\n]+/);
+                let matchedMember = null;
+                let topCandidate = ""; 
+
+                // 拆解並過濾雜訊
+                for (let token of tokens) {
+                    let cleanText = token.replace(/[^A-Z0-9]/g, '');
+                    if (cleanText.length < 3) continue; // 太短的雜訊不要
+
+                    topCandidate = cleanText;
+
+                    // 比對資料庫
+                    for (let member of whitelistArray) {
+                        if (isFuzzyMatch(cleanText, member)) {
+                            matchedMember = member;
+                            break;
+                        }
+                    }
+                    if (matchedMember) break;
+                }
+
+                // 顯示原始文字供除錯
+                rawTextDisplay.textContent = `OCR 讀取結果: ${text.replace(/[\r\n]/g, '')}`;
+
+                // 判斷結果
+                if (matchedMember) {
+                    statusMsg.innerHTML = `<div class="match-success">⭕ 會員通行<br>${matchedMember}</div>`;
+                } else if (topCandidate !== "") {
+                    statusMsg.innerHTML = `<div class="match-fail">❌ 非會員車<br>辨識為: ${topCandidate}</div>`;
+                } else {
+                    statusMsg.innerHTML = `<div class="match-fail" style="color:#aaa;">⚠️ 畫面模糊或找不到車牌</div>`;
+                }
+
+            } catch (err) {
+                console.error(err);
+                statusMsg.innerHTML = `<div class="match-fail">❌ 發生錯誤</div>`;
+            } finally {
+                // 恢復按鈕
+                captureBtn.disabled = false;
+                captureBtn.textContent = "📸 再次拍照辨識";
             }
-        }
+        });
+
     </script>
 </body>
 </html>
