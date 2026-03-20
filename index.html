@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>車牌辨識系統 (TXT版)</title>
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+    <style>
+        body { font-family: "Microsoft JhengHei", sans-serif; text-align: center; padding: 20px; background: #f0f2f5; }
+        #video-container { position: relative; margin: 0 auto; max-width: 100%; width: 640px; }
+        video { width: 100%; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        .overlay {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            width: 80%; height: 100px; border: 2px solid #00ff00; box-shadow: 0 0 20px rgba(0,255,0,0.2);
+            z-index: 10; pointer-events: none;
+        }
+        .controls { margin-top: 20px; }
+        button {
+            padding: 12px 24px; font-size: 18px; border: none; border-radius: 50px;
+            background-color: #007bff; color: white; cursor: pointer; margin: 5px;
+        }
+        button:disabled { background-color: #ccc; }
+        button.scan-btn { background-color: #28a745; }
+        #result-area { margin-top: 20px; padding: 15px; background: white; border-radius: 8px; }
+        .status { font-weight: bold; margin-top: 10px; font-size: 1.1em; }
+        .match-success { color: #28a745; font-size: 1.5em; font-weight: 900; }
+        .match-fail { color: #dc3545; font-size: 1.5em; font-weight: 900; }
+        input { font-size: 18px; padding: 8px; width: 150px; text-transform: uppercase; text-align: center; }
+        .db-info { color: #666; font-size: 0.9em; margin-bottom: 15px; }
+    </style>
+</head>
+<body>
+
+    <h2>🚗 會員車牌辨識 (離線版)</h2>
+    <div id="dbStatus" class="db-info">正在載入會員名單...</div>
+
+    <div id="video-container">
+        <video id="video" playsinline autoplay></video>
+        <div class="overlay"></div>
+    </div>
+    
+    <canvas id="canvas" style="display:none;"></canvas>
+
+    <div class="controls">
+        <button id="startBtn">啟動相機</button>
+        <button id="scanBtn" class="scan-btn" disabled>📸 掃描並比對</button>
+    </div>
+
+    <div id="result-area">
+        <p>辨識結果：<input type="text" id="manualInput" placeholder="OCR結果"></p>
+        <button onclick="checkMembership()">🔍 手動查詢</button>
+        <div id="statusMsg" class="status">等待操作...</div>
+    </div>
+
+    <script>
+        // 變數設定
+        let whitelistSet = new Set(); // 使用 Set 結構，比對速度最快
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const startBtn = document.getElementById('startBtn');
+        const scanBtn = document.getElementById('scanBtn');
+        const statusMsg = document.getElementById('statusMsg');
+        const manualInput = document.getElementById('manualInput');
+        const dbStatus = document.getElementById('dbStatus');
+
+        // 1. 網頁開啟時，立刻讀取 txt 檔案
+        async function loadWhitelist() {
+            try {
+                // 這裡讀取同目錄下的 whitelist.txt
+                const response = await fetch('whitelist.txt');
+                if (!response.ok) throw new Error("找不到 whitelist.txt 檔案");
+                
+                const text = await response.text();
+                
+                // 將文字檔依據換行符號切割，並清理空白與轉大寫
+                const lines = text.split(/\r?\n/);
+                lines.forEach(line => {
+                    const cleanPlate = line.trim().toUpperCase();
+                    if (cleanPlate) {
+                        whitelistSet.add(cleanPlate); // 加入資料庫
+                    }
+                });
+
+                dbStatus.textContent = `✅ 會員資料庫已載入：共 ${whitelistSet.size} 筆資料`;
+                console.log("資料庫載入成功", whitelistSet);
+            } catch (err) {
+                console.error(err);
+                dbStatus.innerHTML = `<span style="color:red">⚠️ 資料庫載入失敗：${err.message}<br>(請確認您是用伺服器模式開啟，而非直接點兩下 html 檔案)</span>`;
+            }
+        }
+        
+        // 執行載入
+        loadWhitelist();
+
+        // 2. 啟動相機
+        startBtn.addEventListener('click', async () => {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { facingMode: "environment" } 
+                });
+                video.srcObject = stream;
+                scanBtn.disabled = false;
+                startBtn.style.display = 'none';
+                statusMsg.textContent = "請將車牌對準綠框";
+            } catch (err) {
+                alert("相機啟動失敗，請確認網址為 https 或 localhost");
+            }
+        });
+
+        // 3. 掃描與辨識
+        scanBtn.addEventListener('click', async () => {
+            statusMsg.textContent = "🔄 影像辨識中...";
+            
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            const dataUrl = canvas.toDataURL('image/png');
+
+            try {
+                const { data: { text } } = await Tesseract.recognize(dataUrl, 'eng');
+                // 移除非英數字元
+                const cleanText = text.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+                
+                if (cleanText.length < 2) {
+                    statusMsg.textContent = "⚠️ 畫面模糊，請重試";
+                } else {
+                    manualInput.value = cleanText;
+                    checkMembership(cleanText);
+                }
+            } catch (err) {
+                statusMsg.textContent = "❌ 辨識錯誤";
+            }
+        });
+
+        // 4. 比對邏輯 (修改為讀取本地 Set)
+        function checkMembership(plateNumber = null) {
+            const queryPlate = plateNumber || manualInput.value.toUpperCase();
+            
+            if (!queryPlate) {
+                alert("請輸入車牌");
+                return;
+            }
+
+            // 直接在記憶體中比對，速度極快
+            if (whitelistSet.has(queryPlate)) {
+                statusMsg.innerHTML = `<div class="match-success">⭕ 通過<br>車號 ${queryPlate} 是會員</div>`;
+                // 這裡可以播放成功音效
+            } else {
+                statusMsg.innerHTML = `<div class="match-fail">❌ 攔截<br>車號 ${queryPlate} 非會員</div>`;
+            }
+        }
+    </script>
+</body>
+</html>
