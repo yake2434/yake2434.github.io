@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>車牌辨識 (手動拍照 + 外部名單)</title>
+    <title>車牌辨識 (手動拍照 + 容錯升級)</title>
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
     <style>
         body { font-family: "Microsoft JhengHei", sans-serif; text-align: center; padding: 10px; background: #000; color: white; margin: 0; }
@@ -48,7 +48,7 @@
 </head>
 <body>
 
-    <h3>📸 車牌辨識 (手動拍照版)</h3>
+    <h3>📸 車牌辨識 (高容錯版)</h3>
     <div id="dbStatus" style="font-size: 12px; color: #aaa; margin-bottom: 10px;">資料庫連線中...</div>
 
     <div id="video-container">
@@ -90,14 +90,14 @@
             'S': ['5'], '5': ['S'], 'I': ['1'], '1': ['I', 'T']
         };
 
-        // 1. 載入外部資料庫 (加入時間戳記防 GitHub 快取)
+        // 1. 載入外部資料庫
         async function loadWhitelist() {
             try {
                 const timeStamp = new Date().getTime();
                 const response = await fetch('whitelist.txt?t=' + timeStamp);
                 
                 if (!response.ok) {
-                    if (response.status === 404) throw new Error("找不到檔案 (404)，請檢查檔名是否為全小寫的 whitelist.txt");
+                    if (response.status === 404) throw new Error("找不到檔案 (404)");
                     throw new Error(`讀取失敗 (HTTP ${response.status})`);
                 }
                 
@@ -113,8 +113,6 @@
                 dbStatus.innerHTML = `<span style="color:#ff4d4d;">❌ 載入失敗: ${err.message}</span>`;
             }
         }
-        
-        // 網頁載入時立刻執行
         loadWhitelist();
 
         // 2. 啟動相機
@@ -134,13 +132,12 @@
             }
         });
 
-        // 3. 擷取並增強影像 (二值化)
+        // 3. 擷取並增強影像
         function captureAndProcessImage() {
             const ctx = processedCanvas.getContext('2d');
             const vw = video.videoWidth;
             const vh = video.videoHeight;
             
-            // 裁切畫面中央
             const cropW = vw * 0.75; 
             const cropH = cropW * 0.30; 
             const cropX = (vw - cropW) / 2;
@@ -153,7 +150,6 @@
             let imageData = ctx.getImageData(0, 0, cropW, cropH);
             let data = imageData.data;
             
-            // 自動色階與二值化
             let min = 255, max = 0;
             for (let i = 0; i < data.length; i += 4) {
                 const gray = data[i] * 0.3 + data[i + 1] * 0.59 + data[i + 2] * 0.11;
@@ -165,7 +161,6 @@
             for (let i = 0; i < data.length; i += 4) {
                 let gray = data[i] * 0.3 + data[i + 1] * 0.59 + data[i + 2] * 0.11;
                 let normalized = (gray - min) / (max - min) * 255;
-                // 門檻設定在 120
                 let value = normalized > 120 ? 255 : 0;
                 data[i] = data[i + 1] = data[i + 2] = value;
             }
@@ -173,42 +168,58 @@
             return processedCanvas.toDataURL('image/png');
         }
 
-        // 4. 容錯比對
+        // 4. ★ 全新強化版：子字串容錯比對 ★
         function isFuzzyMatch(scanned, dbItem) {
-            if (Math.abs(scanned.length - dbItem.length) > 1) return false;
-            let errors = 0;
-            let i = 0, j = 0;
-            while (i < scanned.length && j < dbItem.length) {
-                if (scanned[i] === dbItem[j]) {
-                    i++; j++;
-                } else if (CONFUSABLE_MAP[dbItem[j]] && CONFUSABLE_MAP[dbItem[j]].includes(scanned[i])) {
-                    i++; j++;
-                } else {
-                    errors++; i++; j++;
+            // 情況 1: 完全包含 (解決 2879ZK4 包含 2879ZK 的情況)
+            if (scanned.includes(dbItem)) return true;
+
+            // 如果掃描結果太短，直接判定失敗 (允許最多漏讀一碼)
+            if (scanned.length < dbItem.length - 1) return false;
+
+            // 基礎模糊比對函數
+            const checkFuzzy = (s, d) => {
+                let errors = Math.abs(s.length - d.length);
+                let len = Math.min(s.length, d.length);
+                for (let i = 0; i < len; i++) {
+                    if (s[i] === d[i]) continue;
+                    if (CONFUSABLE_MAP[d[i]] && CONFUSABLE_MAP[d[i]].includes(s[i])) continue;
+                    errors++;
+                }
+                return errors <= 1; // 允許最多 1 個錯字
+            };
+
+            // 情況 2: 長度相近，直接模糊比對
+            if (scanned.length <= dbItem.length) {
+                return checkFuzzy(scanned, dbItem);
+            }
+
+            // 情況 3: 掃描結果較長 (含有前後雜訊)，使用滑動視窗擷取比對
+            // 範例：掃描到 '12879ZK4'，去找 '2879ZK'
+            for (let i = 0; i <= scanned.length - dbItem.length; i++) {
+                let windowStr = scanned.substring(i, i + dbItem.length);
+                if (checkFuzzy(windowStr, dbItem)) {
+                    return true;
                 }
             }
-            return errors <= 1; 
+
+            return false;
         }
 
         // 5. 拍照辨識核心邏輯
         captureBtn.addEventListener('click', async () => {
-            // 防呆：如果資料庫沒載入，擋下來
             if (whitelistArray.length === 0) {
                 alert("請等待資料庫載入完成，或檢查 whitelist.txt 是否存在！");
                 return;
             }
 
-            // UI 狀態：處理中
             captureBtn.disabled = true;
             captureBtn.textContent = "⏳ 分析中...";
             statusMsg.innerHTML = '<span style="color:#ffc107;">AI 讀取中，請稍候...</span>';
             rawTextDisplay.textContent = "";
 
-            // 擷取影像
             const dataUrl = captureAndProcessImage();
 
             try {
-                // 呼叫 Tesseract 進行單次辨識
                 const { data: { text } } = await Tesseract.recognize(dataUrl, 'eng', {
                     tessedit_pageseg_mode: '7',
                     tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789- '
@@ -218,14 +229,12 @@
                 let matchedMember = null;
                 let topCandidate = ""; 
 
-                // 拆解並過濾雜訊
                 for (let token of tokens) {
                     let cleanText = token.replace(/[^A-Z0-9]/g, '');
-                    if (cleanText.length < 3) continue; // 太短的雜訊不要
+                    if (cleanText.length < 3) continue; 
 
                     topCandidate = cleanText;
 
-                    // 比對資料庫
                     for (let member of whitelistArray) {
                         if (isFuzzyMatch(cleanText, member)) {
                             matchedMember = member;
@@ -235,10 +244,8 @@
                     if (matchedMember) break;
                 }
 
-                // 顯示原始文字供除錯
                 rawTextDisplay.textContent = `OCR 讀取結果: ${text.replace(/[\r\n]/g, '')}`;
 
-                // 判斷結果
                 if (matchedMember) {
                     statusMsg.innerHTML = `<div class="match-success">⭕ 會員通行<br>${matchedMember}</div>`;
                 } else if (topCandidate !== "") {
@@ -251,7 +258,6 @@
                 console.error(err);
                 statusMsg.innerHTML = `<div class="match-fail">❌ 發生錯誤</div>`;
             } finally {
-                // 恢復按鈕
                 captureBtn.disabled = false;
                 captureBtn.textContent = "📸 再次拍照辨識";
             }
